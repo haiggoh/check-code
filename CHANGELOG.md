@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-10-14
+
+- Findings are labeled "as of THIS edit — a sibling edit in the same batch may already fix
+  them": per-edit findings on multi-edit batches stop reading as settled defects (observed:
+  F821 "undefined name" bursts fired while the import Edit was a later call in the same batch).
+
 ## 0.1.0 — 2026-09-26
 
 - First release. A PostToolUse hook on Edit/Write/MultiEdit lints the edited file and reports

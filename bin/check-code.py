@@ -17,7 +17,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.1.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -293,7 +293,8 @@ def check_edit(payload):
     findings = sorted(set(findings))
     cap = _cap()
     where = "the lines you just edited in" if ranges is not None else "the file you just wrote,"
-    lines = ["check-code: %d issue(s) in %s %s -- fix them now, or say why a finding is "
+    lines = ["check-code: %d issue(s) in %s %s (as of THIS edit -- a sibling edit in the same "
+             "batch may already fix them) -- fix them now, or say why a finding is "
              "intentional:" % (len(findings), where, path.name)]
     lines += ["  L%d %s %s" % f for f in findings[:cap]]
     if len(findings) > cap:
