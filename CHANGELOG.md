@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.2 — 2026-10-16
+
+- Skill: a "During a bulk fix-sweep" section. Keep check-code on for the whole sweep, and read a
+  new file's findings before moving on: the error class being removed is the one most likely to
+  be written again (observed: a sweep fixing a too-shallow import wrote the same path into a new
+  file; check-code caught it the same turn).
+
 ## 0.1.1 — 2026-10-14
 
 - Findings are labeled "as of THIS edit — a sibling edit in the same batch may already fix

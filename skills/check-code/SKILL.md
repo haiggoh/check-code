@@ -20,6 +20,18 @@ installed and reports findings **on the lines the edit touched** (the whole file
 - `check-code: <language> edits are not being checked -- <tool> is not installed` means the
   file type has a linter but it's missing. Tell the user once. Installing it is their call.
 
+## During a bulk fix-sweep
+
+When you are fixing one error class across many files, the class you are removing is the one you
+are most likely to write again — in a new file especially, which gets less scrutiny than the
+broken files around it. (Observed: a sweep fixing a too-shallow import path wrote that same path
+into a newly created file; check-code caught it the same turn.)
+
+- **Keep check-code on for the whole sweep.** Don't set `CHECK_CODE_OFF`, batch the findings for
+  later, or skim past them to go faster. During a sweep it also catches your own new instances.
+- **After writing a new file, read its findings before moving to the next file.** A Write is
+  checked in full, so a new file is where a repeat of the class shows up.
+
 ## Configuration
 
 The repo's own config always wins (`ruff.toml`, `pyproject.toml [tool.ruff]`, `.shellcheckrc`).
