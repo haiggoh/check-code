@@ -1,0 +1,13 @@
+{
+  "_comment": "How rtc-ship.sh ships THIS repo (run-to-completion's bin/rtc-ship.sh). Data lives here; commands a repo needs live in .rtc/*.sh, opt-in by presence. Adding this file is config-only: no version bump, no release.",
+
+  "tag_prefix": "v",
+  "default_branch": "main",
+
+  "manifest": ".claude-plugin/plugin.json",
+  "changelog": "CHANGELOG.md",
+
+
+
+  "refresh_plugin": "check-code"
+}
