@@ -36,6 +36,19 @@ check-code: 1 issue(s) in the lines you just edited in deploy.sh -- fix them now
 
 zsh isn't checked, because shellcheck doesn't support it.
 
+## Built-in checks
+
+Two checks ship inside the hook itself — no linter needed, nothing to install:
+
+| Code | Fires on | What it tells you |
+|---|---|---|
+| `STDERR-PIPE` | a Python `Popen`/`call`/`check_call` on a touched line with `stderr=PIPE` that nothing in the file drains | an unread stderr pipe deadlocks the child once ~64KB of output accumulates: read it (`communicate()`, a stderr reader) or sink it (`DEVNULL`, a log file) |
+| `NO-HELP` | a `Write` of a new script file (a shebang, or `.py` with a `__main__` guard) that shows no argument-parsing signal | if it takes arguments, parse them, support `--help`, and verify by *running* `<script> --help` — a source grep proves nothing in either direction |
+
+They follow the same rules as the linters: touched lines only, never blocking, and a clean
+file costs one quick scan. `NO-HELP` fires once per file per session. Built-ins also run when
+no external linter matches the file, so a new zsh script still gets the `NO-HELP` check.
+
 ### Adding a linter
 
 `~/.claude/check-code/linters.local.json`:

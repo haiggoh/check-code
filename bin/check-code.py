@@ -7,6 +7,7 @@ touched, so existing debt elsewhere in the file stays quiet. It never blocks an 
 Python 3.9 compatible (hooks may run under macOS /usr/bin/python3).
 """
 import argparse
+import ast
 import json
 import os
 import re
@@ -17,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.1.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.2.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -39,6 +40,9 @@ built-in linters (each runs only if installed):
   python  ruff check          install: pipx install ruff
   shell   shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
   extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
+built-in checks (always on, no linter needed):
+  STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
+  NO-HELP      a Write of a new script file with no argument parsing / --help handling
 
 environment:
   CHECK_CODE_OFF=1        disable the hook
@@ -226,6 +230,134 @@ def in_ranges(line, ranges):
     return ranges is None or any(a - MARGIN <= line <= b + MARGIN for a, b in ranges)
 
 
+# ---------------------------------------------------------------- built-in checks
+# check-code's own pattern checks: stdlib only, no external linter, still filtered to the
+# touched lines, still never blocking.
+
+STDERR_PIPE_MESSAGE = (
+    "subprocess call with stderr=PIPE is never drained: once ~64KB of child stderr fills the "
+    "OS pipe buffer, the child blocks on its next stderr write and hangs for good (pacing "
+    "and retry do not help -- it is output volume, not timing). Read it (proc.communicate(), "
+    "a stderr reader) or sink it (stderr=subprocess.DEVNULL, or a log file).")
+
+NO_HELP_MESSAGE = (
+    "new script file shows no argument parsing or --help handling. If it takes arguments, "
+    "parse them before doing any work, exit non-zero on an unknown flag, and support --help. "
+    "Verify by RUNNING '%s --help' -- a source grep proves nothing: argparse supplies "
+    "-h/--help with the string nowhere in the source, and a script that ignores --help runs "
+    "its real work on the probe.")
+
+HELP_SIGNALS = ("argparse", "optparse", "getopt", "getopts", "click", "typer", "docopt",
+                "sys.argv", "--help", "$#", "usage")
+SCRIPT_EXTS = {"py", "sh", "bash", "ksh", "zsh"}
+
+
+def _dotted(func):
+    """Dotted name of a call target ('subprocess.Popen', 'Popen', ...), or ''."""
+    parts = []
+    while isinstance(func, ast.Attribute):
+        parts.append(func.attr)
+        func = func.value
+    if isinstance(func, ast.Name):
+        parts.append(func.id)
+    else:
+        return ""
+    return ".".join(reversed(parts))
+
+
+def _pipe_value(value):
+    return _dotted(value) in ("subprocess.PIPE", "PIPE")
+
+
+def _bound_names(tree):
+    """id(Call) -> variable name, for calls whose result is bound to a plain variable."""
+    names = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    names.setdefault(id(node.value), target.id)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Call):
+            if isinstance(node.target, ast.Name):
+                names.setdefault(id(node.value), node.target.id)
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                if (isinstance(item.context_expr, ast.Call)
+                        and isinstance(item.optional_vars, ast.Name)):
+                    names.setdefault(id(item.context_expr), item.optional_vars.id)
+    return names
+
+
+def _stderr_reads_or_hidden(tree, name):
+    """True if the file reads that handle's stderr, or passes the object out of sight."""
+    attr_bases = set()
+    drained = False
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+            attr_bases.add(id(node.value))
+            if node.value.id == name and node.attr in ("communicate", "stderr"):
+                drained = True
+    if drained:
+        return True
+    for node in ast.walk(tree):  # used as a bare value (argument, store, return): can't tell
+        if (isinstance(node, ast.Name) and node.id == name and isinstance(node.ctx, ast.Load)
+                and id(node) not in attr_bases):
+            return True
+    return False
+
+
+def _stderr_pipe_lines(content):
+    """Line numbers of Popen/call/check_call with stderr=PIPE that the file never drains.
+    subprocess.run and check_output drain their pipes themselves, so they are never flagged."""
+    try:
+        tree = ast.parse(content)
+    except (SyntaxError, ValueError):
+        return []
+    names = _bound_names(tree)
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        dotted = _dotted(node.func)
+        popen = dotted in ("subprocess.Popen", "Popen")
+        waits = dotted in ("subprocess.call", "subprocess.check_call", "call", "check_call")
+        if not popen and not waits:
+            continue
+        kw = dict((k.arg, k.value) for k in node.keywords if k.arg is not None)
+        if not _pipe_value(kw.get("stderr")):
+            continue
+        if popen:  # call/check_call return only a code: their pipe can never be read
+            name = names.get(id(node))
+            if name and _stderr_reads_or_hidden(tree, name):
+                continue
+        lines.append(node.lineno)
+    return lines
+
+
+def _is_new_script(path, content, shebang):
+    ext = path.suffix.lstrip(".").lower()
+    if ext not in SCRIPT_EXTS and not shebang:
+        return False
+    pythonish = ext == "py" or "python" in shebang
+    if pythonish and not shebang and "__main__" not in content:
+        return False  # a library module, not a runnable script
+    return True
+
+
+def builtin_findings(path, content, tool_name, session_id):
+    """(line, code, message) from check-code's own checks; a clean file costs one scan."""
+    out = []
+    shebang = _shebang(path)
+    if path.suffix.lstrip(".").lower() == "py" or "python" in shebang:
+        for line in _stderr_pipe_lines(content):
+            out.append((line, "STDERR-PIPE", STDERR_PIPE_MESSAGE))
+    if (tool_name == "Write" and _is_new_script(path, content, shebang)
+            and not any(signal in content for signal in HELP_SIGNALS)
+            and _note_once(session_id, "nohelp:" + str(path))):
+        out.append((1, "NO-HELP", NO_HELP_MESSAGE % path.name))
+    return out
+
+
 # ---------------------------------------------------------------- session state
 
 def _state_file(session_id):
@@ -261,35 +393,7 @@ def _cap():
         return MAX_FINDINGS
 
 
-def check_edit(payload):
-    """Return the feedback text for one PostToolUse payload, or '' for nothing to say."""
-    tool_input = payload.get("tool_input") or {}
-    file_path = tool_input.get("file_path")
-    if not file_path:
-        return ""
-    path = Path(file_path)
-    if not path.is_file():
-        return ""
-    candidates = linters_for(path, load_linters())
-    if not candidates:
-        return ""
-    installed = [lin for lin in candidates if find_binary(lin["binary"])]
-    if not installed:
-        lin = candidates[0]
-        if _note_once(payload.get("session_id"), "missing:" + lin["id"]):
-            return ("check-code: %s edits are not being checked -- %s is not installed (%s). "
-                    "Tell the user once; installing is their call." % (lin["language"], lin["binary"],
-                                                                        lin["install"]))
-        return ""
-    content = path.read_text(encoding="utf-8", errors="replace")
-    ranges = touched_ranges(payload.get("tool_name", ""), tool_input, content)
-    findings = []
-    for linter in installed:
-        for line, code, message in run_linter(linter, path):
-            if in_ranges(line, ranges):
-                findings.append((line, code, message))
-    if not findings:
-        return ""
+def _format_findings(findings, ranges, path):
     findings = sorted(set(findings))
     cap = _cap()
     where = "the lines you just edited in" if ranges is not None else "the file you just wrote,"
@@ -300,6 +404,43 @@ def check_edit(payload):
     if len(findings) > cap:
         lines.append("  +%d more (run the linter on the file to see all)" % (len(findings) - cap))
     return "\n".join(lines)
+
+
+def check_edit(payload):
+    """Return the feedback text for one PostToolUse payload, or '' for nothing to say."""
+    tool_input = payload.get("tool_input") or {}
+    file_path = tool_input.get("file_path")
+    if not file_path:
+        return ""
+    path = Path(file_path)
+    if not path.is_file():
+        return ""
+    session_id = payload.get("session_id")
+    tool_name = payload.get("tool_name", "")
+    content = path.read_text(encoding="utf-8", errors="replace")
+    ranges = touched_ranges(tool_name, tool_input, content)
+    findings = [f for f in builtin_findings(path, content, tool_name, session_id)
+                if in_ranges(f[0], ranges)]
+    candidates = linters_for(path, load_linters())
+    if not candidates and not findings:
+        return ""
+    installed = [lin for lin in candidates if find_binary(lin["binary"])]
+    if not installed:
+        if findings:  # the built-in checks need no installed linter
+            return _format_findings(findings, ranges, path)
+        lin = candidates[0]
+        if _note_once(session_id, "missing:" + lin["id"]):
+            return ("check-code: %s edits are not being checked -- %s is not installed (%s). "
+                    "Tell the user once; installing is their call." % (lin["language"], lin["binary"],
+                                                                        lin["install"]))
+        return ""
+    for linter in installed:
+        for line, code, message in run_linter(linter, path):
+            if in_ranges(line, ranges):
+                findings.append((line, code, message))
+    if not findings:
+        return ""
+    return _format_findings(findings, ranges, path)
 
 
 def run_hook(stdin):
@@ -328,11 +469,15 @@ def run_hook(stdin):
 
 def cmd_check(args):
     path = Path(args.file).resolve()
+    status = 0
+    for line, code, message in builtin_findings(
+            path, path.read_text(encoding="utf-8", errors="replace"), "check", None):
+        print("%s:%d %s %s" % (path.name, line, code, message))
+        status = 1
     linters = linters_for(path, load_linters())
-    if not linters:
+    if not linters and status == 0:
         print("no linter configured for %s" % path.name)
         return 0
-    status = 0
     for linter in linters:
         if not find_binary(linter["binary"]):
             print("%s: not installed (%s)" % (linter["id"], linter["install"]))
@@ -353,8 +498,9 @@ def cmd_doctor(_args):
                                  found or "MISSING (%s)" % linter["install"]))
     local = config_home() / "linters.local.json"
     print("local config: %s" % (local if local.exists() else "none (%s)" % local))
+    print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files)")
     if missing == len(linters):
-        print("check-code is INERT: no linter installed.")
+        print("check-code is reduced to its built-in checks: no external linter installed.")
     return 1 if missing == len(linters) else 0
 
 

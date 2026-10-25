@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 — 2026-10-25
+
+- Two built-in checks that need no external linter, following the same touched-lines and
+  never-blocks contracts:
+- `STDERR-PIPE` flags a Python `Popen`/`call`/`check_call` on a touched line with
+  `stderr=PIPE` that nothing in the file drains — an unread pipe deadlocks the child once
+  ~64KB of output fills the OS buffer, and pacing/retry do not help (`subprocess.run` and
+  `check_output` drain internally and are never flagged).
+- `NO-HELP` flags a `Write` of a new script file with no visible argument parsing; its
+  message says to verify by RUNNING `<script> --help`, because a source grep is wrong in
+  both directions: argparse supplies `-h/--help` with the string nowhere in the source,
+  while a script that ignores `--help` runs its real work on the probe. Fires once per
+  file per session; a plain `.py` module (no shebang, no `__main__`) is not a script and
+  stays quiet.
+- Built-ins also run when no external linter matches the file, so a new zsh script gets the
+  `NO-HELP` check even though shellcheck does not support zsh. `doctor` lists the built-ins.
+
 ## 0.1.2 — 2026-10-16
 
 - Skill: a "During a bulk fix-sweep" section. Keep check-code on for the whole sweep, and read a

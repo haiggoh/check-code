@@ -20,6 +20,20 @@ installed and reports findings **on the lines the edit touched** (the whole file
 - `check-code: <language> edits are not being checked -- <tool> is not installed` means the
   file type has a linter but it's missing. Tell the user once. Installing it is their call.
 
+## The built-in codes
+
+- `STDERR-PIPE` — the edited Python line spawns a subprocess with `stderr=subprocess.PIPE`
+  and nothing in the file reads that pipe. The child deadlocks once ~64KB of stderr fills
+  the OS pipe buffer; pacing and retry do not help, it is output volume. Fix in the same
+  turn: `proc.communicate()`, a stderr reader, or sink it (`stderr=subprocess.DEVNULL`, a
+  log file). `subprocess.run` is safe — it drains internally.
+- `NO-HELP` — the Write created a script file with no visible argument parsing. If it takes
+  arguments, parse them before any work, exit non-zero on an unknown flag, and support
+  `--help`. Then verify by **running** `<script> --help`: a source grep proves nothing in
+  either direction (argparse supplies `-h/--help` with the string nowhere in the source;
+  a script that ignores `--help` runs its real work on the probe). If the script
+  deliberately takes no arguments, say so in one clause and move on.
+
 ## During a bulk fix-sweep
 
 When you are fixing one error class across many files, the class you are removing is the one you

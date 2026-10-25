@@ -236,3 +236,202 @@ def test_hook_via_subprocess_emits_hook_json(tmp_path):
                        env=dict(os.environ))
     assert r.returncode == 0
     assert json.loads(r.stdout)["hookSpecificOutput"]["hookEventName"] == "PostToolUse"
+
+
+# ---------------------------------------------------------------- built-in checks: stderr-pipe
+
+def write_payload(path, session="w"):
+    return {"session_id": session, "tool_name": "Write", "tool_input": {"file_path": str(path)}}
+
+
+def test_popen_stderr_pipe_unread_is_flagged(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "proc.wait()\n")
+    _, out = hook(edit_payload(f, "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)"))
+    assert "STDERR-PIPE" in out and "L3" in out and "communicate()" in out
+
+
+def test_unassigned_popen_stderr_pipe_is_flagged(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "subprocess.Popen(cmd, stderr=subprocess.PIPE)\n")
+    _, out = hook(edit_payload(f, "subprocess.Popen(cmd, stderr=subprocess.PIPE)"))
+    assert "STDERR-PIPE" in out and "L3" in out
+
+
+def test_check_call_stderr_pipe_is_flagged(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "subprocess.check_call(cmd, stderr=subprocess.PIPE)\n")
+    _, out = hook(edit_payload(f, "subprocess.check_call(cmd, stderr=subprocess.PIPE)"))
+    assert "STDERR-PIPE" in out and "L3" in out
+
+
+def test_popen_stderr_pipe_without_any_linter_installed(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "proc.wait()\n")
+    _, out = hook(edit_payload(f, "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)"))
+    assert "STDERR-PIPE" in out and "not installed" not in out
+
+
+def test_popen_stderr_pipe_on_untouched_line_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "proc.wait()\n"
+        "a0 = 0\n"
+        "a1 = 0\n"
+        "y = 2\n")
+    _, out = hook(edit_payload(f, "y = 2"))
+    assert "STDERR-PIPE" not in out
+
+
+def test_popen_stderr_pipe_drained_via_communicate_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "proc.communicate()\n")
+    _, out = hook(write_payload(f))
+    assert "STDERR-PIPE" not in out
+
+
+def test_popen_stderr_pipe_read_directly_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "proc.stderr.read()\n")
+    _, out = hook(write_payload(f))
+    assert "STDERR-PIPE" not in out
+
+
+def test_run_stderr_pipe_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "subprocess.run(cmd, stderr=subprocess.PIPE)\n")
+    _, out = hook(write_payload(f))
+    assert "STDERR-PIPE" not in out
+
+
+def test_popen_devnull_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.DEVNULL)\n"
+        "proc.wait()\n")
+    _, out = hook(write_payload(f))
+    assert "STDERR-PIPE" not in out
+
+
+def test_popen_handed_to_a_reader_stays_quiet(tmp_path):
+    f = tmp_path / "probe.py"
+    f.write_text(
+        "import subprocess\n"
+        "cmd = ['echo', 'hi']\n"
+        "proc = subprocess.Popen(cmd, stderr=subprocess.PIPE)\n"
+        "def drain(p):\n"
+        "    p.stderr.read()\n"
+        "drain(proc)\n")
+    _, out = hook(write_payload(f))
+    assert "STDERR-PIPE" not in out
+
+
+def test_broken_python_file_does_not_crash_the_builtin(tmp_path):
+    f = tmp_path / "broken.py"
+    f.write_text("def broken(:\n")
+    code, out = hook(write_payload(f))
+    assert code == 0 and "STDERR-PIPE" not in out
+
+
+# ---------------------------------------------------------------- built-in checks: no --help
+
+def test_write_new_shell_script_without_help_is_flagged(tmp_path):
+    f = tmp_path / "do-thing.sh"
+    f.write_text("#!/bin/bash\necho doing\n")
+    _, out = hook(write_payload(f, session="h1"))
+    assert "NO-HELP" in out and "RUNNING" in out
+
+
+def test_write_new_zsh_script_without_help_is_flagged(tmp_path):
+    # zsh matches no external linter at all -- the built-ins must still run
+    f = tmp_path / "prompt"
+    f.write_text("#!/bin/zsh\necho hi\n")
+    _, out = hook(write_payload(f, session="h2"))
+    assert "NO-HELP" in out
+
+
+def test_write_main_guard_py_script_without_parsing_is_flagged(tmp_path):
+    f = tmp_path / "runner.py"
+    f.write_text("if __name__ == \"__main__\":\n    print(\"go\")\n")
+    _, out = hook(write_payload(f, session="h3"))
+    assert "NO-HELP" in out
+
+
+def test_write_py_script_with_argparse_stays_quiet(tmp_path):
+    f = tmp_path / "cli.py"
+    f.write_text("#!/usr/bin/env python3\nimport argparse\n"
+                 "parser = argparse.ArgumentParser()\nparser.parse_args()\n")
+    _, out = hook(write_payload(f, session="h4"))
+    assert "NO-HELP" not in out
+
+
+def test_write_shell_script_with_getopts_stays_quiet(tmp_path):
+    f = tmp_path / "do.sh"
+    f.write_text("#!/bin/bash\nwhile getopts \"v\" o; do :; done\n")
+    _, out = hook(write_payload(f, session="h5"))
+    assert "NO-HELP" not in out
+
+
+def test_write_py_module_stays_quiet(tmp_path):
+    # no shebang and no __main__ guard: a library module, not a script
+    f = tmp_path / "lib.py"
+    f.write_text("def add(a, b):\n    return a + b\n")
+    _, out = hook(write_payload(f, session="h6"))
+    assert "NO-HELP" not in out
+
+
+def test_write_markdown_stays_quiet(tmp_path):
+    f = tmp_path / "notes.md"
+    f.write_text("# notes\n")
+    assert hook(write_payload(f, session="h7")) == (0, "")
+
+
+def test_no_help_not_repeated_within_a_session(tmp_path):
+    f = tmp_path / "do-thing.sh"
+    f.write_text("#!/bin/bash\necho doing\n")
+    _, first = hook(write_payload(f, session="h8"))
+    _, second = hook(write_payload(f, session="h8"))
+    assert "NO-HELP" in first and "NO-HELP" not in second
+
+
+def test_edit_of_existing_script_gets_no_help_check(tmp_path):
+    f = tmp_path / "do-thing.sh"
+    f.write_text("#!/bin/bash\necho doing\n")
+    _, out = hook(edit_payload(f, "echo doing"))
+    assert "NO-HELP" not in out
+
+
+def test_doctor_lists_builtin_checks():
+    r = cli("doctor")
+    assert "builtin" in r.stdout
