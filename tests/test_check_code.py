@@ -26,6 +26,8 @@ def isolate(tmp_path, monkeypatch):
     monkeypatch.setattr(cc.tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.delenv("CHECK_CODE_OFF", raising=False)
     monkeypatch.delenv("CHECK_CODE_MAX", raising=False)
+    # the HARDCODED-PATH check only speaks inside a git repo: give every test one
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, capture_output=True)
 
 
 def edit_payload(path, new, tool="Edit", session="s", **extra):
@@ -435,3 +437,178 @@ def test_edit_of_existing_script_gets_no_help_check(tmp_path):
 def test_doctor_lists_builtin_checks():
     r = cli("doctor")
     assert "builtin" in r.stdout
+
+
+# ---------------------------------------------------------------- built-in checks: hardcoded paths
+
+def test_hardcoded_cache_version_path_is_flagged(tmp_path):
+    f = tmp_path / "tool.sh"
+    f.write_text("#!/bin/bash\nls ~/.claude/plugins/cache/haiggoh/free-agents/0.44.1/bin\n")
+    _, out = hook(edit_payload(f, 'ls ~/.claude/plugins/cache/haiggoh/free-agents/0.44.1/bin'))
+    assert "HARDCODED-PATH" in out and "L2" in out and "portability" in out.lower()
+
+
+def test_hardcoded_workspace_checkout_path_is_flagged(tmp_path):
+    f = tmp_path / "tool.sh"
+    f.write_text("#!/bin/bash\ncd ~/ClaudeWorkspace/free-agents && git status\n")
+    _, out = hook(edit_payload(f, 'cd ~/ClaudeWorkspace/free-agents && git status'))
+    assert "HARDCODED-PATH" in out
+
+
+def test_hardcoded_home_path_is_flagged(tmp_path):
+    f = tmp_path / "tool.py"
+    f.write_text('x = 1\np = "/Users/bra0002h/.claude/settings.json"\n')
+    _, out = hook(edit_payload(f, 'p = "/Users/bra0002h/.claude/settings.json"'))
+    assert "HARDCODED-PATH" in out
+
+
+def test_users_shared_stays_quiet(tmp_path):
+    f = tmp_path / "tool.sh"
+    f.write_text("#!/bin/bash\nls /Users/Shared/fonts\n")
+    assert hook(edit_payload(f, 'ls /Users/Shared/fonts'))[1] == ""
+
+
+def test_changelog_lines_stay_quiet(tmp_path):
+    f = tmp_path / "CHANGELOG.md"
+    f.write_text("# Changelog\nshipped from ~/.claude/plugins/cache/haiggoh/free-agents/0.44.1 today\n")
+    assert hook(edit_payload(f, "shipped from ~/.claude/plugins/cache/haiggoh/free-agents/0.44.1 today"))[1] == ""
+
+
+def test_tmp_built_fixture_lines_stay_quiet(tmp_path):
+    f = tmp_path / "test_fix.py"
+    line = '# fixture: p = tmp_path / "plugins/cache/own/name/1.2.3"  ($TMP-built)'
+    f.write_text("x = 1\n" + line + "\n")
+    assert hook(edit_payload(f, line))[1] == ""
+
+
+def test_hardcoded_path_on_untouched_line_stays_quiet(tmp_path):
+    f = tmp_path / "tool.sh"
+    f.write_text("#!/bin/bash\nls ~/.claude/plugins/cache/a/b/1.0.0/x\necho hi\necho ho\necho he\ny = 3\n")
+    _, out = hook(edit_payload(f, "y = 3"))
+    assert "HARDCODED-PATH" not in out
+
+
+def test_hardcoded_path_scope_is_git_repos_only(tmp_path):
+    outside = tmp_path.parent / (tmp_path.name + "-outside")  # a sibling dir: no .git above it
+    outside.mkdir(exist_ok=True)
+    f = outside / "notes.md"
+    line = "see /Users/bra0002h/.claude/x"
+    f.write_text("x\n" + line + "\n")
+    assert hook(edit_payload(f, line))[1] == ""  # not a git repo: out of scope
+    subprocess.run(["git", "init", "-q", str(outside)], check=True, capture_output=True)
+    _, out = hook(edit_payload(f, line))
+    assert "HARDCODED-PATH" in out  # the same line, now inside a repo
+
+
+# ---------------------------------------------------------------- built-in checks: skill budget
+
+def skill_doc(body_words, front_words=0):
+    front = "---\nname: x\ndescription: d %s\n---\n" % ("fw" * front_words)
+    return front + "\n" + " ".join(["word"] * body_words) + "\n"
+
+
+def test_oversized_skill_md_is_flagged_on_write(tmp_path):
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(1600))
+    _, out = hook(write_payload(f, session="sb1"))
+    assert "SKILL-BUDGET" in out and "references/" in out
+
+
+def test_undersized_skill_md_stays_quiet(tmp_path):
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(800))
+    assert hook(write_payload(f, session="sb2"))[1] == ""
+
+
+def test_skill_budget_counts_body_not_frontmatter(tmp_path):
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(100, front_words=1400))
+    assert hook(write_payload(f, session="sb3"))[1] == ""
+
+
+def test_non_skill_markdown_stays_quiet(tmp_path):
+    f = tmp_path / "notes.md"
+    f.write_text(" ".join(["word"] * 1600) + "\n")
+    assert hook(write_payload(f, session="sb4"))[1] == ""
+
+
+def test_skill_budget_env_override(tmp_path, monkeypatch):
+    monkeypatch.setenv("CHECK_CODE_SKILL_BUDGET_WORDS", "10")
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(12))
+    _, out = hook(write_payload(f, session="sb5"))
+    assert "SKILL-BUDGET" in out
+
+
+def test_skill_budget_fires_once_per_session(tmp_path):
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(1600))
+    _, first = hook(write_payload(f, session="sb6"))
+    _, second = hook(write_payload(f, session="sb6"))
+    assert "SKILL-BUDGET" in first and "SKILL-BUDGET" not in second
+
+
+def test_skill_budget_on_far_edit_still_fires(tmp_path):
+    # a whole-file property must not be silenced by the touched-lines filter
+    f = tmp_path / "SKILL.md"
+    f.write_text(skill_doc(1600) + "\n" + "\n".join("pad line %d" % i for i in range(400)))
+    _, out = hook(edit_payload(f, "pad line 399 touched"))
+    assert "SKILL-BUDGET" in out
+
+
+# ---------------------------------------------------------------- built-in checks: menu nav
+
+def test_numbered_quit_is_flagged(tmp_path):
+    f = tmp_path / "menu.sh"
+    f.write_text('#!/bin/bash\necho "5) Exit"\n')
+    _, out = hook(edit_payload(f, 'echo "5) Exit"'))
+    assert "MENU-NAV" in out and "numbers = actions" in out
+
+
+def test_numbered_back_is_flagged(tmp_path):
+    f = tmp_path / "menu.py"
+    f.write_text('x = 1\nprint("2) Back")\n')
+    _, out = hook(edit_payload(f, 'print("2) Back")'))
+    assert "MENU-NAV" in out
+
+
+def test_numbered_cancel_is_flagged(tmp_path):
+    f = tmp_path / "menu.py"
+    f.write_text('x = 1\n_box row "3) Cancel"\n')
+    _, out = hook(edit_payload(f, '_box row "3) Cancel"'))
+    assert "MENU-NAV" in out
+
+
+def test_numbered_action_stays_quiet(tmp_path):
+    f = tmp_path / "menu.sh"
+    f.write_text('#!/bin/bash\necho "1) Install everything"\n')
+    assert hook(edit_payload(f, 'echo "1) Install everything"'))[1] == ""
+
+
+def test_lowercase_label_stays_quiet(tmp_path):
+    # the plan's grammar pattern targets capitalised label rows; keep scope
+    f = tmp_path / "menu.sh"
+    f.write_text('#!/bin/bash\necho "5) exit"\n')
+    assert hook(edit_payload(f, 'echo "5) exit"'))[1] == ""
+
+
+def test_letter_navigation_stays_quiet(tmp_path):
+    f = tmp_path / "menu.sh"
+    f.write_text('#!/bin/bash\necho "q) Quit  ·  b Back"\n')
+    assert hook(edit_payload(f, 'echo "q) Quit  ·  b Back"'))[1] == ""
+
+
+# ---------------------------------------------------------------- mutation: each check is what fires
+
+def test_mutation_new_checks_are_what_fire(tmp_path, monkeypatch):
+    f = tmp_path / "tool.sh"
+    f.write_text('#!/bin/bash\necho "5) Exit"\nls ~/.claude/plugins/cache/a/b/1.0.0/x\n')
+    monkeypatch.setattr(cc, "_menu_nav_lines", lambda content: [])
+    assert "MENU-NAV" not in hook(edit_payload(f, 'echo "5) Exit"'))[1]
+    assert "HARDCODED-PATH" in hook(edit_payload(f, 'ls ~/.claude/plugins/cache/a/b/1.0.0/x'))[1]
+    monkeypatch.setattr(cc, "_hardcoded_path_lines", lambda content: [])
+    assert "HARDCODED-PATH" not in hook(edit_payload(f, 'ls ~/.claude/plugins/cache/a/b/1.0.0/x'))[1]
+    big = tmp_path / "SKILL.md"
+    big.write_text(skill_doc(1600))
+    monkeypatch.setattr(cc, "_skill_body_after_frontmatter", lambda content: "tiny")
+    assert "SKILL-BUDGET" not in hook(write_payload(big, session="mut1"))[1]

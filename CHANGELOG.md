@@ -1,5 +1,25 @@
 # Changelog
 
+## [0.3.0] - 2026-10-26
+
+- Three new built-in checks (touched lines only, never blocking, no linter needed):
+  - `HARDCODED-PATH`: a touched line in a file inside a git repo carrying a literal
+    `/Users/<name>/` home path, a `ClaudeWorkspace/<name>` checkout path, or a pinned
+    plugin-cache VERSION path (`plugins/cache/<owner>/<name>/1.2.3`) — the machine-specific
+    shapes the portable-repos rule bans from committed content. `/Users/Shared/` is fine;
+    `$TMP`/`tmp_path`-built test-fixture lines and CHANGELOG files are exempt.
+  - `SKILL-BUDGET`: a Write/Edit of a `SKILL.md` whose body after frontmatter exceeds 1500
+    words (`CHECK_CODE_SKILL_BUDGET_WORDS` overrides; an override that is set but invalid is
+    reported, never silently ignored). Fires once per file per session, and file-level: the
+    touched-lines filter does not silence it.
+  - `MENU-NAV`: a touched menu row that gives NAVIGATION a number (`echo "5) Exit"`) — house
+    menu grammar is numbers = actions, letters = navigation (`q` Quit, `b` Back).
+- Scope decided by replay over 217 real Edit/Write events (4,270 added lines) from the ten
+  most recent transcripts: hits on /tmp scripts and ~/.claude notes (no repo, no reader to
+  be wrong for) motivated the git-repo guard; hits in the check's own test fixtures are
+  intentional literals; the remaining catches included real expanded-home and
+  checkout-coupled paths in committed docs from concurrent sessions.
+
 ## 0.2.0 — 2026-10-25
 
 - Two built-in checks that need no external linter, following the same touched-lines and

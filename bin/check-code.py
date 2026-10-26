@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.2.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.3.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -43,6 +43,13 @@ built-in linters (each runs only if installed):
 built-in checks (always on, no linter needed):
   STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
   NO-HELP      a Write of a new script file with no argument parsing / --help handling
+  HARDCODED-PATH  a literal /Users/<name>/ home, ClaudeWorkspace/<name> checkout, or
+               plugin-cache VERSION path on a touched line — use ~/…, $HOME/… or an env
+               override instead ($TMP-built test-fixture lines and CHANGELOGs are exempt)
+  SKILL-BUDGET a SKILL.md whose body after frontmatter exceeds 1500 words
+               (CHECK_CODE_SKILL_BUDGET_WORDS overrides; once per file per session)
+  MENU-NAV     a menu row giving NAVIGATION a number ("5) Exit"): house grammar is
+               numbers = actions, letters = navigation (q Quit, b Back)
 
 environment:
   CHECK_CODE_OFF=1        disable the hook
@@ -251,6 +258,31 @@ HELP_SIGNALS = ("argparse", "optparse", "getopt", "getopts", "click", "typer", "
                 "sys.argv", "--help", "$#", "usage")
 SCRIPT_EXTS = {"py", "sh", "bash", "ksh", "zsh"}
 
+HARDCODED_PATH_MESSAGE = (
+    "hardcoded machine-specific path in a committed file: it is wrong for every other reader "
+    "(another machine, a plugin-cache version that moved on, a checkout that lives elsewhere) "
+    "and silently breaks portability. Write ~/… or $HOME/… (the expanded form only where a "
+    "file format demands it), take the location from an env override or a self-discovery "
+    "helper, and never pin a plugin-cache VERSION path — resolve the newest at call time.")
+
+SKILL_BUDGET_MESSAGE = (
+    "SKILL.md body is %d words (budget %d): skills stay lean — keep imperative rules and "
+    "steps; move incidents, rationale, worked examples to references/ or docs/.")
+
+MENU_NAV_MESSAGE = (
+    "menu gives NAVIGATION a number: house menu grammar is numbers = actions, letters = "
+    "navigation — q Quit (top-level/standalone screens only), b Back (screens reached from a "
+    "parent, never both on one screen), Enter = the shown default. Put this row on a letter "
+    "(see free-agents bin/session_picker_model.py for the majority convention).")
+
+CACHE_PATH = re.compile(r"plugins/cache/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/\d+(?:\.\d+)+")
+WORKSPACE_PATH = re.compile(r"ClaudeWorkspace/[A-Za-z0-9_.-]+")
+HOME_PATH = re.compile(r"/Users/(?!Shared/)[A-Za-z0-9_.-]+/")
+FIXTURE_MARKERS = ("$TMP", "tmp_path", "TMPDIR", "tempfile")
+MENU_NAV = re.compile(r"(?:print|echo|_box).*?\b\d\)\s*(?:Exit|Quit|Back|Cancel)\b")
+DEFAULT_SKILL_BUDGET_WORDS = 1500
+FILE_LEVEL_CODES = {"NO-HELP", "SKILL-BUDGET"}  # whole-file properties: never range-filtered
+
 
 def _dotted(func):
     """Dotted name of a call target ('subprocess.Popen', 'Popen', ...), or ''."""
@@ -344,6 +376,51 @@ def _is_new_script(path, content, shebang):
     return True
 
 
+def _skill_budget_words():
+    """(budget, env_error): the documented default, or the CHECK_CODE_SKILL_BUDGET_WORDS
+    override. An override that is SET but invalid is reported, never silently ignored."""
+    raw = os.environ.get("CHECK_CODE_SKILL_BUDGET_WORDS")
+    if not raw:
+        return DEFAULT_SKILL_BUDGET_WORDS, None
+    try:
+        return max(1, int(raw)), None
+    except ValueError:
+        return (DEFAULT_SKILL_BUDGET_WORDS,
+                "CHECK_CODE_SKILL_BUDGET_WORDS=%r is not an integer -- using %d"
+                % (raw, DEFAULT_SKILL_BUDGET_WORDS))
+
+
+def _skill_body_after_frontmatter(content):
+    if content.startswith("---"):
+        end = content.find("\n---", 3)
+        if end >= 0:
+            return content[end + 4:]
+    return content
+
+
+def _in_git_repo(path):
+    """True when the file lives inside a git repo. `.git` is a DIRECTORY in a normal repo
+    but a FILE in a worktree, so existence — not is_file — is the test."""
+    for folder in [path.parent, *path.parent.parents]:
+        if (folder / ".git").exists():
+            return True
+    return False
+
+
+def _hardcoded_path_lines(content):
+    out = []
+    for i, line in enumerate(content.splitlines(), 1):
+        if any(marker in line for marker in FIXTURE_MARKERS):
+            continue
+        if CACHE_PATH.search(line) or WORKSPACE_PATH.search(line) or HOME_PATH.search(line):
+            out.append(i)
+    return out
+
+
+def _menu_nav_lines(content):
+    return [i for i, line in enumerate(content.splitlines(), 1) if MENU_NAV.search(line)]
+
+
 def builtin_findings(path, content, tool_name, session_id):
     """(line, code, message) from check-code's own checks; a clean file costs one scan."""
     out = []
@@ -355,6 +432,18 @@ def builtin_findings(path, content, tool_name, session_id):
             and not any(signal in content for signal in HELP_SIGNALS)
             and _note_once(session_id, "nohelp:" + str(path))):
         out.append((1, "NO-HELP", NO_HELP_MESSAGE % path.name))
+    if "changelog" not in path.name.lower() and _in_git_repo(path):
+        for line in _hardcoded_path_lines(content):
+            out.append((line, "HARDCODED-PATH", HARDCODED_PATH_MESSAGE))
+    budget, env_error = _skill_budget_words()
+    if env_error and _note_once(session_id, "skillbudgetenv"):
+        out.append((1, "SKILL-BUDGET", env_error))
+    if path.name == "SKILL.md":
+        body = _skill_body_after_frontmatter(content)
+        if len(body.split()) > budget and _note_once(session_id, "skillbudget:" + str(path)):
+            out.append((1, "SKILL-BUDGET", SKILL_BUDGET_MESSAGE % (len(body.split()), budget)))
+    for line in _menu_nav_lines(content):
+        out.append((line, "MENU-NAV", MENU_NAV_MESSAGE))
     return out
 
 
@@ -420,7 +509,7 @@ def check_edit(payload):
     content = path.read_text(encoding="utf-8", errors="replace")
     ranges = touched_ranges(tool_name, tool_input, content)
     findings = [f for f in builtin_findings(path, content, tool_name, session_id)
-                if in_ranges(f[0], ranges)]
+                if f[1] in FILE_LEVEL_CODES or in_ranges(f[0], ranges)]
     candidates = linters_for(path, load_linters())
     if not candidates and not findings:
         return ""
@@ -498,7 +587,8 @@ def cmd_doctor(_args):
                                  found or "MISSING (%s)" % linter["install"]))
     local = config_home() / "linters.local.json"
     print("local config: %s" % (local if local.exists() else "none (%s)" % local))
-    print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files)")
+    print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files), "
+          "HARDCODED-PATH (committed paths), SKILL-BUDGET (SKILL.md size), MENU-NAV (menu grammar)")
     if missing == len(linters):
         print("check-code is reduced to its built-in checks: no external linter installed.")
     return 1 if missing == len(linters) else 0

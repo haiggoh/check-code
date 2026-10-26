@@ -33,6 +33,16 @@ installed and reports findings **on the lines the edit touched** (the whole file
   either direction (argparse supplies `-h/--help` with the string nowhere in the source;
   a script that ignores `--help` runs its real work on the probe). If the script
   deliberately takes no arguments, say so in one clause and move on.
+- `HARDCODED-PATH` — a touched line inside a git repo pins a machine-specific path (a literal
+  `/Users/<name>/` home, a `ClaudeWorkspace/<name>` checkout, or a plugin-cache VERSION
+  path). Fix by writing `~/…`/`$HOME/…`, taking the location from an env override or a
+  discovery helper, and never pinning a cache version. `$TMP`-built fixture lines and
+  CHANGELOGs are exempt.
+- `SKILL-BUDGET` — a SKILL.md's body exceeds the word budget (default 1500). Keep the body
+  lean: imperative rules and steps; move incidents, rationale and worked examples to
+  `references/` or `docs/`. Fires once per file per session.
+- `MENU-NAV` — a menu row gives NAVIGATION a number (`5) Exit`). House grammar: numbers are
+  actions, letters are navigation (`q` Quit, `b` Back); Enter is the shown default.
 
 ## During a bulk fix-sweep
 

@@ -38,12 +38,15 @@ zsh isn't checked, because shellcheck doesn't support it.
 
 ## Built-in checks
 
-Two checks ship inside the hook itself — no linter needed, nothing to install:
+Five checks ship inside the hook itself — no linter needed, nothing to install:
 
 | Code | Fires on | What it tells you |
 |---|---|---|
 | `STDERR-PIPE` | a Python `Popen`/`call`/`check_call` on a touched line with `stderr=PIPE` that nothing in the file drains | an unread stderr pipe deadlocks the child once ~64KB of output accumulates: read it (`communicate()`, a stderr reader) or sink it (`DEVNULL`, a log file) |
 | `NO-HELP` | a `Write` of a new script file (a shebang, or `.py` with a `__main__` guard) that shows no argument-parsing signal | if it takes arguments, parse them, support `--help`, and verify by *running* `<script> --help` — a source grep proves nothing in either direction |
+| `HARDCODED-PATH` | a touched line in a file inside a git repo carrying a literal `/Users/<name>/` home path, a `ClaudeWorkspace/<name>` checkout path, or a pinned plugin-cache VERSION path | machine-specific paths in committed content are wrong for every other reader: use `~/…`/`$HOME/…`, an env override, or a self-discovery helper. `$TMP`-built fixture lines and CHANGELOGs are exempt |
+| `SKILL-BUDGET` | a `SKILL.md` whose body after frontmatter exceeds 1500 words (`CHECK_CODE_SKILL_BUDGET_WORDS` overrides) | skills stay lean: imperative rules and steps in the body; incidents, rationale and worked examples move to `references/` or `docs/`. Once per file per session |
+| `MENU-NAV` | a touched menu row giving NAVIGATION a number (`echo "5) Exit"`) | house menu grammar: numbers = actions, letters = navigation (`q` Quit, `b` Back), Enter = the shown default |
 
 They follow the same rules as the linters: touched lines only, never blocking, and a clean
 file costs one quick scan. `NO-HELP` fires once per file per session. Built-ins also run when
@@ -78,6 +81,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" --help
 | `CHECK_CODE_MAX` | max findings per edit (default 10) |
 | `CHECK_CODE_HOME` | config dir (default `~/.claude/check-code`) |
 | `CHECK_CODE_DEBUG=1` | log hook exceptions to `$CHECK_CODE_HOME/debug.log` |
+| `CHECK_CODE_SKILL_BUDGET_WORDS` | SKILL.md body word budget for `SKILL-BUDGET` (default 1500) |
 
 ## Install
 
