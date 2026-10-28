@@ -699,6 +699,21 @@ def test_catalog_tiers_and_install_data():
     assert cc.install_hint({"id": "x", "install": "npm install -g x"}) == "npm install -g x"
 
 
+def test_install_hint_tolerates_malformed_local_entries():
+    # a local linters.local.json entry may carry install as a dict with a plain-string cmd
+    assert cc.install_hint({"id": "x", "install": {"cmd": "npm install x"}}) == "npm install x"
+    assert cc.install_hint({"id": "x"}) == ""
+
+
+def test_doctor_shows_install_hint_for_missing_linters(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert "MISSING (pipx install ruff)" in out
+    assert "MISSING (brew install biome)" in out
+    assert "{" not in out   # no raw install dict may leak into the display
+
+
 def _stub_bin(tmp_path, monkeypatch, name, fixture):
     stub_dir = tmp_path / ("stubs-" + name)
     stub_dir.mkdir(exist_ok=True)

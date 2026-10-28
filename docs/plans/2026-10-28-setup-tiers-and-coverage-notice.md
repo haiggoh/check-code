@@ -139,4 +139,8 @@ Notice implementation notes (2026-10-28, from the build):
   per-tool install command, per "pointing at setup".
 - **C3's label** is the extension with a dot (`.py`); for extensionless shebang-matched files it
   is the language name lowercased (`shell`).
+- **Any installed candidate covers the file**: if at least one linter matched to the file is
+  installed and ran, the other missing candidates stay silent (the file is linted; a coverage
+  notice would be redundant noise). No shipped file type has two candidates; a local linter
+  could create the case.
 

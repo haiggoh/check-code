@@ -252,9 +252,13 @@ BUILTIN = [
 
 
 def install_hint(linter):
-    """Display form of the install command (local linters carry a plain string)."""
+    """Display form of the install command (local linters carry a plain string; a malformed
+    entry degrades to what it holds instead of crashing a display path)."""
     install = linter.get("install") or ""
-    return install if isinstance(install, str) else " ".join(install.get("cmd", []))
+    if isinstance(install, str):
+        return install
+    cmd = install.get("cmd", [])
+    return cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
 
 
 def load_linters():
@@ -723,7 +727,7 @@ def cmd_doctor(_args):
         found = find_binary(linter["binary"])
         missing += 0 if found else 1
         print("%-11s %-8s %s" % (linter["id"], linter["language"],
-                                 found or "MISSING (%s)" % linter["install"]))
+                                 found or "MISSING (%s)" % install_hint(linter)))
     local = config_home() / "linters.local.json"
     print("local config: %s" % (local if local.exists() else "none (%s)" % local))
     print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files), "
