@@ -35,6 +35,8 @@ SHELLCHECK_DEFAULT_EXCLUDE = "SC1091,SC2016,SC2034"
 # and runtime errors, pyflakes, bugbear, bare except.
 RUFF_DEFAULT_SELECT = "E4,E7,E9,F,B,E722"
 RUFF_CONFIGS = ("ruff.toml", ".ruff.toml")
+CONFIG_FILE = "config.json"       # written by `setup`: {"tier": "basic"|"polyglot"|"none"}
+TIERS = ("basic", "polyglot", "none")
 
 HELP_EPILOG = """\
 linters (each runs only if installed):
@@ -97,6 +99,24 @@ def _has_tool_ruff(path):
         return "[tool.ruff" in path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+
+
+def recorded_tier():
+    """The tier setup recorded in $CHECK_CODE_HOME/config.json, or None when setup never
+    ran. An invalid recorded value reads as None here (it is not a choice the user made);
+    doctor reports it loudly instead."""
+    value = _load_json(config_home() / CONFIG_FILE, {}).get("tier")
+    return value if value in TIERS else None
+
+
+def tier_covers(recorded, entry_tier):
+    """Does the recorded tier include a linter of entry_tier? User linters ('local') are
+    always in tier."""
+    if recorded == "none":
+        return False
+    if entry_tier == "local" or recorded == "polyglot":
+        return True
+    return entry_tier == "basic"
 
 
 # ---------------------------------------------------------------- linters
@@ -586,6 +606,36 @@ def _format_findings(findings, ranges, path):
     return "\n".join(lines)
 
 
+COVERAGE_NOTICE_C3 = ('check-code: %s edits are not linted — run "check-code.py setup" once '
+                      'to choose coverage (or "setup --tier none" to silence this).')
+COVERAGE_NOTICE_C4 = ('check-code: %s is missing but your "%s" tier includes it — run '
+                      '"check-code.py setup".')
+
+
+def _coverage_notice(path, candidates, recorded, session_id):
+    """The quiet coverage notice (plan section C); first rule that applies decides.
+    Reached only when no installed linter covered the file and nothing else will print.
+    C1 no catalog entry covers the file type / C2 the recorded tier excludes it -> silent.
+    C3 setup never ran -> ONE line, once per session in TOTAL. C4 the tier includes the
+    linter but it went missing -> one line, once per session per linter, pointing at
+    setup, never at a per-tool install command."""
+    if not candidates:
+        return ""
+    in_tier = [lin for lin in candidates
+               if recorded is None or tier_covers(recorded, lin["tier"])]
+    if not in_tier:
+        return ""
+    if recorded is None:
+        if not _note_once(session_id, "coverage"):
+            return ""
+        label = ("." + path.suffix.lstrip(".")) if path.suffix else candidates[0]["language"].lower()
+        return COVERAGE_NOTICE_C3 % label
+    for lin in in_tier:
+        if _note_once(session_id, "tiermissing:" + lin["id"]):
+            return COVERAGE_NOTICE_C4 % (lin["id"], recorded)
+    return ""
+
+
 def check_edit(payload):
     """Return the feedback text for one PostToolUse payload, or '' for nothing to say."""
     tool_input = payload.get("tool_input") or {}
@@ -602,18 +652,16 @@ def check_edit(payload):
     findings = [f for f in builtin_findings(path, content, tool_name, session_id)
                 if f[1] in FILE_LEVEL_CODES or in_ranges(f[0], ranges)]
     candidates = linters_for(path, load_linters())
+    recorded = recorded_tier()
+    if recorded == "none":
+        candidates = []  # an explicit choice: no external linters run, nothing to notice
     if not candidates and not findings:
         return ""
     installed = [lin for lin in candidates if find_binary(lin["binary"])]
     if not installed:
         if findings:  # the built-in checks need no installed linter
             return _format_findings(findings, ranges, path)
-        lin = candidates[0]
-        if _note_once(session_id, "missing:" + lin["id"]):
-            return ("check-code: %s edits are not being checked -- %s is not installed (%s). "
-                    "Tell the user once; installing is their call." % (lin["language"], lin["binary"],
-                                                                        install_hint(lin)))
-        return ""
+        return _coverage_notice(path, candidates, recorded, session_id)
     for linter in installed:
         for line, code, message in run_linter(linter, path):
             if in_ranges(line, ranges):

@@ -148,14 +148,16 @@ def test_cap_and_more_line(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- missing linter / fail-open
 
-def test_missing_linter_noted_once_per_session(tmp_path, monkeypatch):
+def test_missing_linter_is_one_quiet_notice_per_session_total(tmp_path, monkeypatch):
+    # the per-linter "not installed (install cmd)" line is REPLACED by the coverage notice
     monkeypatch.setattr(cc, "find_binary", lambda name: None)
     f = tmp_path / "a.py"
     f.write_text("x = 1\n")
     first = hook(edit_payload(f, "x = 1", session="m"))[1]
-    assert "not installed" in first and "pipx install ruff" in first
+    assert "not linted" in first and '"check-code.py setup"' in first
+    assert "pipx install ruff" not in first and "not installed" not in first
     assert hook(edit_payload(f, "x = 1", session="m"))[1] == ""
-    assert "not installed" in hook(edit_payload(f, "x = 1", session="other"))[1]
+    assert "not linted" in hook(edit_payload(f, "x = 1", session="other"))[1]
 
 
 @pytest.mark.parametrize("payload", [
@@ -751,3 +753,119 @@ def test_stubbed_actionlint_gets_the_format_template(tmp_path, monkeypatch):
     assert "L7 shell-name" in out
     argv = calls.read_text()
     assert "-format" in argv and cc.ACTIONLINT_FORMAT in argv and str(wf) in argv
+
+
+# ---------------------------------------------------------------- the quiet coverage notice
+
+def _setup_tier(tier=None):
+    """Record a setup tier in the isolated CHECK_CODE_HOME (None = setup never ran)."""
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    if tier is not None:
+        (home / "config.json").write_text(json.dumps({"tier": tier}))
+
+
+def test_c1_uncovered_file_types_are_always_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()  # no setup ever recorded
+    for name, body in (("notes.md", "hello\n"), ("data.json", "{}\n"), ("list.txt", "x\n")):
+        f = tmp_path / name
+        f.write_text(body)
+        assert hook(edit_payload(f, body.strip(), session="c1"))[1] == ""
+
+
+def test_c3_notice_once_per_session_in_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    first = hook(edit_payload(f, "x = 1", session="n"))[1]
+    assert ".py edits are not linted" in first and '"check-code.py setup"' in first
+    assert '"setup --tier none"' in first
+    # once per session in TOTAL, not per language: a different language stays silent
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    assert hook(edit_payload(t, "const a = 1;", session="n"))[1] == ""
+    assert hook(edit_payload(f, "x = 1", session="n"))[1] == ""      # same file too
+    assert ".py edits" in hook(edit_payload(f, "x = 1", session="n2"))[1]  # new session: fires
+
+
+def test_c3_label_for_extensionless_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    s = tmp_path / "deploy"
+    s.write_text("#!/bin/bash\necho hi\n")
+    out = hook(edit_payload(s, "echo hi", session="sb"))[1]
+    assert "shell edits are not linted" in out
+
+
+def test_c2_tier_excluding_language_is_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("basic")
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    assert hook(edit_payload(t, "const a = 1;", session="t"))[1] == ""  # C2: user chose basic
+
+
+def test_c4_missing_in_tier_linter_points_at_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("basic")
+    p = tmp_path / "a.py"
+    p.write_text("x = 1\n")
+    first = hook(edit_payload(p, "x = 1", session="t"))[1]
+    assert "ruff" in first and "setup" in first and "pipx install" not in first
+    assert hook(edit_payload(p, "x = 1", session="t"))[1] == ""        # once per session per linter
+
+
+def test_c4_is_per_linter_not_per_session_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("polyglot")
+    p = tmp_path / "a.py"
+    p.write_text("x = 1\n")
+    first = hook(edit_payload(p, "x = 1", session="u"))[1]
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    second = hook(edit_payload(t, "const a = 1;", session="u"))[1]
+    # C4 names the linter and the tier, not the per-tool install command; per linter, not once total
+    assert "ruff" in first and "tier" in first and "pipx install" not in first
+    assert "biome" in second and "brew install" not in second
+
+
+def test_c2_tier_none_silences_and_stops_external_linters(tmp_path, monkeypatch):
+    _setup_tier("none")
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/bin/" + name)
+    monkeypatch.setattr(cc, "run_linter", lambda lin, p: [(1, "F401", "unused import")])
+    f = tmp_path / "a.py"
+    f.write_text("import os\n")
+    assert hook(edit_payload(f, "import os", session="v"))[1] == ""    # runs nothing, says nothing
+
+
+def test_clean_covered_edit_prints_nothing(tmp_path, monkeypatch):
+    def fake_find(name):
+        return "/bin/ruff" if name == "ruff" else None
+    monkeypatch.setattr(cc, "find_binary", fake_find)
+    monkeypatch.setattr(cc, "run_linter", lambda lin, p: [])   # covered, and the lint is clean
+    _setup_tier()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    assert hook(edit_payload(f, "x = 1", session="w"))[1] == ""       # covered + clean: no notice
+
+
+def test_findings_print_without_the_notice(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    f = tmp_path / "probe.py"
+    f.write_text("import subprocess\nproc = subprocess.Popen(['x'], stderr=subprocess.PIPE)\n"
+                 "proc.wait()\n")
+    _, out = hook(edit_payload(f, "proc = subprocess.Popen(['x'], stderr=subprocess.PIPE)",
+                               session="z"))
+    assert "STDERR-PIPE" in out and "not linted" not in out
+
+
+def test_invalid_recorded_tier_reads_as_never_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("banana")
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    out = hook(edit_payload(f, "x = 1", session="q"))[1]
+    assert "not linted" in out    # C3: an invalid tier is not a choice the user made

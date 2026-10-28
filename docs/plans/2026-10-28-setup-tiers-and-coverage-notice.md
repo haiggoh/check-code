@@ -124,3 +124,19 @@ Decisions taken during verification:
 - Rust stays absent (design §A): clippy lints a crate, not a file — README says so instead of
   shipping a fake per-file check.
 
+Notice implementation notes (2026-10-28, from the build):
+
+- **Findings suppress the notice.** When built-in findings exist for an edit whose linter is
+  missing, the findings print alone and the notice stays pending for the next quiet edit — the
+  replaced message had the same placement, and it is the quieter reading of "never a notice on a
+  clean, covered edit".
+- **Tier `none` stops external linters from running**, not just notices ("built-in checks still
+  run" only reads as a contrast). `disabled` in linters.local.json remains the opt-out for an
+  unwanted installed linter under basic/polyglot.
+- **An invalid `config.json` tier reads as never-recorded** in the hook (fail-open: it is not a
+  choice the user made); `doctor` reports the invalid value loudly.
+- **C4 names linter and tier** (`ruff is missing but your "basic" tier includes it`) and never the
+  per-tool install command, per "pointing at setup".
+- **C3's label** is the extension with a dot (`.py`); for extensionless shebang-matched files it
+  is the language name lowercased (`shell`).
+
