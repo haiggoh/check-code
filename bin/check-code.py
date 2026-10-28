@@ -889,12 +889,27 @@ def cmd_check(args):
 
 def cmd_doctor(_args):
     linters = load_linters()
+    recorded = recorded_tier()
+    raw = _load_json(config_home() / CONFIG_FILE, {}).get("tier")
+    if recorded is None:
+        print("tier: setup never run" + (" (config.json holds %r, which is not a tier)" % raw
+                                         if raw is not None else ""))
+    else:
+        print("tier: %s" % recorded)
     missing = 0
     for linter in linters:
         found = find_binary(linter["binary"])
-        missing += 0 if found else 1
-        print("%-11s %-8s %s" % (linter["id"], linter["language"],
-                                 found or "MISSING (%s)" % install_hint(linter)))
+        if found:
+            missing += 0
+            print("%-11s %-8s %s" % (linter["id"], linter["language"], found))
+            continue
+        missing += 1
+        if recorded is not None and linter["tier"] != "local" \
+                and not tier_covers(recorded, linter["tier"]):
+            note = "not in your tier (%s)" % recorded       # excluded on purpose: not MISSING
+        else:
+            note = "MISSING (%s)" % install_hint(linter)
+        print("%-11s %-8s %s" % (linter["id"], linter["language"], note))
     local = config_home() / "linters.local.json"
     print("local config: %s" % (local if local.exists() else "none (%s)" % local))
     print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files), "

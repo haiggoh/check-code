@@ -442,6 +442,43 @@ def test_doctor_lists_builtin_checks():
     assert "builtin" in r.stdout
 
 
+def test_doctor_shows_the_recorded_tier(tmp_path, monkeypatch, capsys):
+    _setup_tier("polyglot")
+    rc = cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert rc == 0 and out.splitlines()[0] == "tier: polyglot"
+
+
+def test_doctor_reports_setup_never_run(capsys):
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    assert not home.exists() or not (home / "config.json").exists()
+    rc = cc.cmd_doctor(None)
+    assert rc == 0 and capsys.readouterr().out.splitlines()[0] == "tier: setup never run"
+
+
+def test_doctor_reports_an_invalid_recorded_tier_loudly(tmp_path, monkeypatch, capsys):
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text('{"tier": "zzz"}', encoding="utf-8")
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert "setup never run" in out and "zzz" in out      # loud, not a silent default
+
+
+def test_doctor_marks_linters_outside_the_recorded_tier(tmp_path, monkeypatch, capsys):
+    _setup_tier("basic")
+    monkeypatch.setattr(cc, "find_binary", lambda n: "/bin/" + n if n in ("ruff", "biome") else None)
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    # installed: shows the path, even out of tier (an installed linter still runs)
+    assert "ruff        Python   /bin/ruff" in out
+    assert "biome       TS/JS    /bin/biome" in out
+    # missing AND out of tier: excluded on purpose, so not a MISSING
+    assert "not in your tier (basic)" in out
+    # missing but IN tier: the drift case (C4), still a MISSING with its install hint
+    assert "shellcheck" in out and "MISSING (brew install shellcheck)" in out
+
+
 # ---------------------------------------------------------------- built-in checks: hardcoded paths
 
 def test_hardcoded_cache_version_path_is_flagged(tmp_path):
