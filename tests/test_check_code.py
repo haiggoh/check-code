@@ -1,4 +1,5 @@
 """Tests for check-code. Real ruff/shellcheck are used when installed; stubs otherwise."""
+import argparse
 import importlib.util
 import io
 import json
@@ -884,3 +885,151 @@ def test_invalid_recorded_tier_reads_as_never_setup(tmp_path, monkeypatch):
     f.write_text("x = 1\n")
     out = hook(edit_payload(f, "x = 1", session="q"))[1]
     assert "not linted" in out    # C3: an invalid tier is not a choice the user made
+
+
+# ---------------------------------------------------------------- setup: tiers, installs, config
+
+def _stub_setup(monkeypatch, present=(), managers=("brew", "pipx"), runner=None):
+    """Stub find_binary + the injectable install runner; returns the call log."""
+    def fake_find(name):
+        return "/bin/" + name if (name in present or name in managers) else None
+    monkeypatch.setattr(cc, "find_binary", fake_find)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", runner or fake_run)
+    return calls
+
+
+def _config():
+    return json.loads((Path(os.environ["CHECK_CODE_HOME"]) / "config.json").read_text())
+
+
+def setup_args(tier, yes=True, dry_run=False):
+    return argparse.Namespace(tier=tier, yes=yes, dry_run=dry_run)
+
+
+def test_setup_dry_run_changes_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    rc = cc.cmd_setup(setup_args("polyglot", dry_run=True))
+    out = capsys.readouterr().out
+    assert rc == 0 and "dry run" in out and "brew install biome" in out
+    assert calls == []                                                  # runner never called
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_yes_installs_and_records_the_tier(monkeypatch, capsys):
+    installed = set()                      # shared with find_binary: an install makes it appear
+    monkeypatch.setattr(cc, "find_binary",
+                        lambda name: "/bin/" + name
+                        if (name in installed or name in ("brew", "pipx")) else None)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        installed.add(cmd[-1])
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", fake_run)
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"]]
+    assert "installed: /bin/ruff" in out and "installed: /bin/shellcheck" in out
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_reports_a_planted_failed_install(monkeypatch, capsys):
+    # planted positive: the runner "succeeds" but leaves no binary -> FAILED, tier still recorded
+    _stub_setup(monkeypatch, runner=lambda cmd: (True, "Everything up-to-date"))
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "FAILED" in out and "ruff" in out
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_missing_manager_prints_the_command_and_continues(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)          # nothing, no manager
+    calls = []
+    monkeypatch.setattr(cc, "_run_install",
+                        lambda cmd: (calls.append(list(cmd)), (True, "ok"))[1])
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "cannot install here" in out and calls == []
+    assert "pipx install ruff" in out                                   # the command to run yourself
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_records_none_and_installs_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    rc = cc.cmd_setup(setup_args("none"))
+    out = capsys.readouterr().out
+    assert rc == 0 and calls == [] and "silent" in out
+    assert _config() == {"tier": "none"}
+
+
+def test_setup_rerun_changes_the_tier(monkeypatch):
+    _stub_setup(monkeypatch, present=("ruff", "shellcheck", "biome", "swiftlint", "rubocop",
+                                      "actionlint"))
+    cc.cmd_setup(setup_args("basic"))
+    cc.cmd_setup(setup_args("none"))
+    assert _config() == {"tier": "none"}
+
+
+def test_setup_declined_confirmation_changes_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: True)
+    monkeypatch.setattr(cc, "_confirm", lambda count: False)
+    rc = cc.cmd_setup(setup_args("basic", yes=False))
+    assert rc == 0 and "aborted" in capsys.readouterr().out and calls == []
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_requires_yes_when_not_a_tty(monkeypatch, capsys):
+    _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    rc = cc.cmd_setup(setup_args("basic", yes=False))
+    assert rc == 2 and "yes" in capsys.readouterr().err.lower()
+
+
+def test_setup_menu_enter_is_basic_and_q_quits(capsys):
+    lines = iter(["", "2", "q", "3"])
+    read = lambda prompt="": next(lines)   # noqa: E731
+    assert cc._prompt_tier(read) == "basic"
+    assert cc._prompt_tier(read) == "polyglot"
+    assert cc._prompt_tier(read) is None
+    assert cc._prompt_tier(read) == "none"
+
+
+def test_setup_menu_reprompts_on_garbage(capsys):
+    lines = iter(["banana", "1"])
+    assert cc._prompt_tier(lambda prompt="": next(lines)) == "basic"
+    assert "1, 2, 3" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------- setup CLI (real subprocess)
+
+def test_setup_help_documents_tiers_and_env():
+    r = cli("setup", "--help")
+    assert r.returncode == 0
+    for word in ("basic", "polyglot", "none", "CHECK_CODE_HOME", "--dry-run", "--yes", "--tier"):
+        assert word in r.stdout
+    assert not Path(os.environ["CHECK_CODE_HOME"]).exists()   # a probe must not write
+
+
+def test_setup_usage_errors_exit_2():
+    assert cli("setup", "--tier", "banana").returncode == 2
+    assert cli("setup", "--bogus").returncode == 2
+
+
+def test_setup_dry_run_via_cli_writes_nothing():
+    r = cli("setup", "--tier", "polyglot", "--dry-run")
+    assert r.returncode == 0 and "dry run" in r.stdout
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_without_tty_requires_a_tier():
+    r = subprocess.run([sys.executable, str(SCRIPT), "setup"], capture_output=True, text=True,
+                       env=dict(os.environ), input="")
+    assert r.returncode == 2 and "tier" in r.stderr.lower()

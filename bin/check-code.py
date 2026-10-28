@@ -47,6 +47,12 @@ linters (each runs only if installed):
   ruby     rubocop --lint      install: brew install rubocop        (.rb)
   actions  actionlint          install: brew install actionlint    (.github/workflows/*.ya?ml)
   extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
+setup (the preferred way to get them):
+  setup --tier basic     ruff + shellcheck (today's built-ins)
+  setup --tier polyglot  basic + biome, swiftlint, rubocop, actionlint
+  setup --tier none      no external linters; built-in checks stay on, coverage notices go quiet
+  Run it in a terminal for the menu; --dry-run shows the plan without changing anything.
+  The chosen tier is recorded in $CHECK_CODE_HOME/config.json ("setup --help" has the details).
 built-in checks (always on, no linter needed):
   STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
   NO-HELP      a Write of a new script file with no argument parsing / --help handling
@@ -697,6 +703,167 @@ def run_hook(stdin):
     return 0
 
 
+# ---------------------------------------------------------------- setup
+# The preferred route: choose a coverage tier up front and install its linters, instead of
+# discovering a missing dependency mid-edit. Only the catalog is managed here; a user's own
+# linters.local.json entries are theirs. Never sudo, never a system-package override.
+
+INSTALL_TIMEOUT = 600  # seconds per install command (a brew bottle can be large)
+
+SETUP_MENU = """\
+check-code setup — choose linter coverage
+
+  1) basic     ruff + shellcheck: Python and shell
+  2) polyglot  basic + biome, swiftlint, rubocop, actionlint: also TS/JS, Swift, Ruby, GitHub Actions
+  3) none      no external linters; built-in checks still run and coverage notices stay silent
+
+  Enter = basic    q) Quit
+"""
+
+SETUP_EPILOG = """\
+tiers:
+  basic     ruff + shellcheck (Python, shell)
+  polyglot  basic + biome, swiftlint, rubocop, actionlint (TS/JS, Swift, Ruby, GitHub Actions)
+  none      no external linters: built-in checks still run and coverage notices stay silent
+interactive (stdin is a TTY): choose a tier, see the plan, confirm. Installs use the package
+manager the catalog names (brew, pipx) and never sudo; a missing package manager prints the
+command to run yourself instead of failing. After each install the binary is re-resolved, so
+the report is installed / already present / FAILED, not the installer's exit code.
+environment:
+  CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
+                    (default ~/.claude/check-code)
+"""
+
+
+def _isatty():
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _run_install(cmd):
+    """Run one install command: (ok, reason). THE injectable runner — tests replace it so no
+    test ever runs a real installer."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    lines = (proc.stdout + proc.stderr).strip().splitlines()
+    reason = lines[-1].strip() if lines else "exited %d" % proc.returncode
+    return proc.returncode == 0, reason
+
+
+def setup_plan(tier):
+    """[(linter, status, detail)] for the tier: installed / install / cannot."""
+    if tier == "none":
+        return []
+    plan = []
+    for linter in [dict(item) for item in BUILTIN]:
+        if not tier_covers(tier, linter["tier"]):
+            continue
+        found = find_binary(linter["binary"])
+        if found:
+            plan.append((linter, "installed", found))
+        elif find_binary(linter["install"]["manager"]):
+            plan.append((linter, "install", install_hint(linter)))
+        else:
+            plan.append((linter, "cannot", "%s is not installed here -- run '%s' yourself"
+                         % (linter["install"]["manager"], install_hint(linter))))
+    return plan
+
+
+def _print_plan(tier, plan):
+    print("check-code setup -- tier: %s" % tier)
+    if tier == "none":
+        print("  no external linters will be installed or run; built-in checks stay on and the "
+              "missing-linter notice stays silent")
+        return
+    for linter, status, detail in plan:
+        print("  %-11s %s: %s" % (linter["id"],
+                                  {"installed": "already installed",
+                                   "install": "will install",
+                                   "cannot": "cannot install here"}[status], detail))
+
+
+def record_tier(tier):
+    """Write (or overwrite) the recorded tier; setup re-runs may change it and other config
+    keys are preserved."""
+    path = config_home() / CONFIG_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config = _load_json(path, {})
+    config["tier"] = tier
+    path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
+
+
+def _confirm(count, read_line=None):
+    read_line = read_line or input
+    try:
+        answer = read_line("install %d linter(s)? [y/N] " % count)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _prompt_tier(read_line=None):
+    """Interactive tier choice: numbers = actions, letters = navigation, Enter = the shown
+    default. Returns the tier, or None when the user quits."""
+    read_line = read_line or input
+    print(SETUP_MENU)
+    choices = {"1": "basic", "2": "polyglot", "3": "none", "": "basic"}
+    while True:
+        try:
+            answer = read_line("choose 1, 2, 3 [Enter = basic, q = quit]: ").strip().lower()
+        except EOFError:
+            return None
+        if answer in ("q", "quit"):
+            return None
+        if answer in choices:
+            return choices[answer]
+        print("not a choice: 1, 2, 3, Enter, or q")
+
+
+def cmd_setup(args):
+    tier = args.tier
+    if tier is None:
+        if not _isatty():
+            print("setup: the menu needs a TTY; pass --tier basic|polyglot|none", file=sys.stderr)
+            return 2
+        tier = _prompt_tier()
+        if tier is None:
+            print("nothing changed")
+            return 0
+    plan = setup_plan(tier)
+    _print_plan(tier, plan)
+    if args.dry_run:
+        print("dry run: nothing installed, nothing recorded")
+        return 0
+    if not args.yes:
+        if not _isatty():
+            print("setup: --yes is required when stdin is not a TTY (or use --dry-run)",
+                  file=sys.stderr)
+            return 2
+        pending = [entry for entry in plan if entry[1] == "install"]
+        if pending and not _confirm(len(pending)):
+            print("aborted: nothing installed, nothing recorded")
+            return 0
+    for linter, status, reason in plan:
+        if status != "install":
+            continue
+        _run_install(linter["install"]["cmd"])
+        found = find_binary(linter["binary"])  # verify by outcome, not by exit code
+        if found:
+            print("  %-11s installed: %s" % (linter["id"], found))
+        else:
+            print("  %-11s FAILED: %s" % (linter["id"], reason or
+                                          "the installer reported success but the binary is still "
+                                          "not on PATH"))
+    record_tier(tier)
+    print("tier recorded: %s (%s)" % (tier, config_home() / CONFIG_FILE))
+    print('coverage applies from the next edit; "check-code.py doctor" shows what is installed')
+    return 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def cmd_check(args):
@@ -748,13 +915,21 @@ def main(argv=None):
     p = sub.add_parser("check", help="lint a whole FILE the way the hook would")
     p.add_argument("file")
     sub.add_parser("doctor", help="show which linters are installed")
+    s = sub.add_parser("setup", help="install a tier's linters and record the choice",
+                       description="Install the linters of a coverage tier and record it in "
+                                   "$CHECK_CODE_HOME/config.json. Never uses sudo.",
+                       epilog=SETUP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("--tier", choices=TIERS, help="basic | polyglot | none")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print the plan and change nothing")
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help(sys.stderr)
         return 2
     if args.cmd == "hook":
         return run_hook(sys.stdin)
-    return {"check": cmd_check, "doctor": cmd_doctor}[args.cmd](args)
+    return {"check": cmd_check, "doctor": cmd_doctor, "setup": cmd_setup}[args.cmd](args)
 
 
 if __name__ == "__main__":
