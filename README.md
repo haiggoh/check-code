@@ -20,21 +20,62 @@ check-code: 1 issue(s) in the lines you just edited in deploy.sh -- fix them now
 - **The repo's config wins.** If the project has `ruff.toml`, `[tool.ruff]` in `pyproject.toml`, or
   `.shellcheckrc`, those rules apply unchanged. Without one, a pinned, conservative rule set is used.
   It is pinned because a linter's own default set can change between versions and suddenly flood you.
-- **Use what's installed, and say when something is missing.** Linters that aren't installed are
-  skipped. If a file type has a linter but it's missing, check-code says so once per session with
-  the install command, rather than doing nothing without a word.
+- **Get the linters up front.** `check-code.py setup` installs a coverage tier and records the
+  choice, so a missing dependency is discovered on purpose, never mid-edit. Until setup has run
+  (or when a linter recorded for coverage goes missing), check-code prints at most one quiet line
+  per session pointing at `setup` — never an install command, never a repeat.
 - **Never block, never cost.** Findings are context for Claude, not a gate. A clean edit produces
   no output and no tokens. Any error (timeout, crash, bad input) means no output and exit 0.
 
 ## Linters
 
+Tier `basic` (installed by default by `setup`):
+
 | Language | Linter | Picked by | Default rules (no repo config) |
 |---|---|---|---|
 | Python | `ruff check` | `.py`, `.pyi`, python shebang | `E4,E7,E9,F,B,E722`: errors, pyflakes, bugbear, bare except |
 | Shell | `shellcheck` | `.sh`, `.bash`, `.ksh`, sh/bash shebang | all except `SC1091,SC2016,SC2034` |
+
+Tier `polyglot` (add these; each verified single-file, zero-config, machine-parseable):
+
+| Language | Linter | Picked by | Default rules (no repo config) |
+|---|---|---|---|
+| TS/JS | `biome lint` | `.ts`, `.tsx`, `.js`, `.jsx` | biome's recommended set (a repo `biome.json` still wins) |
+| Swift | `swiftlint lint` | `.swift` | swiftlint's default rules (a repo `.swiftlint.yml` still wins) |
+| Ruby | `rubocop --lint` | `.rb` | the Lint department only: error-class cops, as ruff's set is pinned |
+| Actions | `actionlint` | `.github/workflows/*.ya?ml` | every check (schema, expressions, shell names, …) |
+
+| Language | Linter | Picked by | Default rules |
+|---|---|---|---|
 | anything | yours | `linters.local.json` | whatever the command does |
 
-zsh isn't checked, because shellcheck doesn't support it.
+zsh isn't checked, because shellcheck doesn't support it. **Rust isn't checked either**: clippy
+lints a crate, not a file, so it can't honour "only the lines you touched" — and a fake per-file
+Rust check is worse than none.
+
+## Setup: choose the linters up front
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup                  # interactive menu
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --tier polyglot  # scripted
+```
+
+| Tier | Installs | Covers |
+|---|---|---|
+| `basic` | ruff, shellcheck | Python and shell |
+| `polyglot` | basic + biome, swiftlint, rubocop, actionlint | also TS/JS, Swift, Ruby, GitHub Actions workflows |
+| `none` | nothing | built-in checks only; coverage notices stay silent |
+
+When stdin is a TTY the menu asks first (numbers = choices, Enter = the shown default `basic`,
+`q` = quit), then shows the **plan** before touching anything: per linter, `already installed` /
+`will install` (the exact command) / `cannot install here` (why, plus the command to run yourself).
+Installs run only after confirmation — `--yes` for scripts, `--dry-run` to look without changing
+anything — through the package manager the catalog names (`brew`, `pipx`); never `sudo`, never a
+system-package override. A missing package manager prints the command and continues. Each install
+is then verified **by outcome**: the binary is re-resolved, so the report says `installed` /
+`FAILED`, not whatever the installer's exit code claimed. The chosen tier is recorded in
+`$CHECK_CODE_HOME/config.json`; re-running `setup` is idempotent and may change it — `doctor`
+shows the current one.
 
 ## Built-in checks
 
@@ -72,7 +113,8 @@ The command must print `file:line[:col]: message [(rule)]` lines. Most linters o
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" --help
   hook          PostToolUse entry point (hook JSON on stdin)
   check FILE    lint a whole file the way the hook would
-  doctor        which linters are installed
+  doctor        which linters are installed, and the recorded coverage tier
+  setup         choose a coverage tier and install its linters (--tier/--yes/--dry-run)
 ```
 
 | Env var | Effect |
@@ -92,7 +134,15 @@ Through the haiggoh marketplace (get-haiggoh), or:
 /plugin install check-code@haiggoh
 ```
 
-Requires `python3` 3.9+, plus the linters you want: `pipx install ruff`, `brew install shellcheck`.
+Requires `python3` 3.9+. Then pick your coverage — one run, not per-package installs:
+
+```
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --tier polyglot
+```
+
+`basic` (ruff + shellcheck) is enough for Python and shell work; `polyglot` adds biome,
+swiftlint, rubocop and actionlint for TS/JS, Swift, Ruby and GitHub Actions; `none` deliberately
+runs no external linter. The hook works before this too — see Setup for what each tier covers.
 
 ## How it relates to other review tools
 

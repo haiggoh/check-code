@@ -726,6 +726,13 @@ def test_actionlint_matches_by_workflow_path(tmp_path):
     assert [lin["id"] for lin in cc.linters_for(other, linters)] == ["actionlint"]
 
 
+def test_version_is_the_same_everywhere():
+    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert cc.VERSION == manifest["version"]
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [%s]" % cc.VERSION in changelog
+
+
 def test_catalog_tiers_and_install_data():
     cat = {lin["id"]: lin for lin in cc.load_linters()}
     assert cat["ruff"]["tier"] == "basic" and cat["shellcheck"]["tier"] == "basic"

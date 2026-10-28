@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.4.0] - 2026-10-28
+
+- **A setup route, preferred to on-demand nagging**: `check-code.py setup` (the menu on a TTY;
+  `--tier basic|polyglot|none [--yes] [--dry-run]` for scripts) installs a coverage tier up front
+  and records it in `$CHECK_CODE_HOME/config.json`. The plan is always shown before acting — per
+  linter `already installed` / `will install` (the exact command) / `cannot install here` (why,
+  plus the command to run yourself) — installs run through the package manager the catalog names
+  (`brew`, `pipx`) and never `sudo`, and each install is verified **by outcome** (the binary is
+  re-resolved: `installed` / `FAILED`), not by exit code. `--dry-run` parses arguments before any
+  side effect and changes nothing; a missing package manager prints the command and continues.
+- **Four new catalog linters**, each verified against the real tool before entering (real outputs
+  committed as fixtures; `docs/plans/2026-10-28-setup-tiers-and-coverage-notice.md` holds the
+  verification record): biome (TS/JS, `biome lint --reporter=checkstyle`), swiftlint (Swift,
+  default rules), rubocop (Ruby, `--lint`: the Lint department, the pinned conservative set),
+  actionlint (`.github/workflows/*.ya?ml`, matched by **path** — extension matching would lint any
+  YAML as a broken workflow — with a `-format` template, because the default output interleaves
+  code-snippet lines a gcc-style parser would misread). Rust is deliberately absent: clippy lints
+  a crate, not a file. Tiers: `basic` = ruff + shellcheck, `polyglot` = basic + these four.
+- **The quiet coverage notice** replaces the per-linter "not installed (install cmd)" line.
+  Rules, first match wins: uncovered file types and languages outside the recorded tier are always
+  silent; with no setup ever recorded, ONE line per session **in total** points at `setup` (or
+  `--tier none` to silence); a linter the tier includes that went missing gets one line per session
+  per linter, pointing at `setup` and never at a per-tool install command. A clean, covered edit
+  prints nothing; tier `none` stops external linters running at all (built-in checks stay on).
+- **doctor** shows the recorded tier (or "setup never run") and marks a missing out-of-tier linter
+  `not in your tier` instead of `MISSING` — a basic-tier user no longer reads four false problems.
+- `check-code.py --help` lists the catalog with install commands and the `setup` route; `setup
+  --help` documents tiers, flags and `CHECK_CODE_HOME`.
 ## [0.3.1] - 2026-10-28
 
 - Branding: the findings report now leads with the 🩻 check-code identity mark — its credit
