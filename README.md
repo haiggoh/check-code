@@ -1,4 +1,4 @@
-# check-code
+# 🩻🔬 check-code
 
 **Lint the lines Claude just edited, and hand the findings straight back.**
 

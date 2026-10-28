@@ -612,3 +612,13 @@ def test_mutation_new_checks_are_what_fire(tmp_path, monkeypatch):
     big.write_text(skill_doc(1600))
     monkeypatch.setattr(cc, "_skill_body_after_frontmatter", lambda content: "tiny")
     assert "SKILL-BUDGET" not in hook(write_payload(big, session="mut1"))[1]
+
+
+# ---------------------------------------------------------------- branding: the mark leads the findings report
+
+def test_findings_header_leads_with_the_branding_mark(tmp_path):
+    f = tmp_path / "do-thing.sh"
+    f.write_text("#!/bin/bash\necho doing\n")
+    _, out = hook(write_payload(f, session="brand1"))
+    assert out.splitlines()[0].startswith("🩻 check-code: ")
+    assert "issue(s) in" in out and "NO-HELP" in out

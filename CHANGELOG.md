@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.1] - 2026-10-28
+
+- Branding: the findings report now leads with the 🩻 check-code identity mark — its credit
+  moment, the instant it just caught something for you. Static surfaces carry the About-section
+  pair 🩻🔬 (plugin.json description, README, skill attribution); the marketplace catalog sync
+  rides the get-haiggoh batch ship (plan Task 22). Emit format otherwise unchanged; the
+  missing-linter notice and clean-edit silence stay unbranded, per the credit-moments rule.
+
 ## [0.3.0] - 2026-10-26
 
 - Three new built-in checks (touched lines only, never blocking, no linter needed):
