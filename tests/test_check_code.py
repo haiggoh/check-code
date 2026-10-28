@@ -622,3 +622,132 @@ def test_findings_header_leads_with_the_branding_mark(tmp_path):
     _, out = hook(write_payload(f, session="brand1"))
     assert out.splitlines()[0].startswith("🩻 check-code: ")
     assert "issue(s) in" in out and "NO-HELP" in out
+
+
+# ---------------------------------------------------------------- catalog: the verified polyglot linters
+
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def test_biome_parser_reads_real_fixture():
+    out = cc._biome_parse((FIXTURES / "biome-checkstyle.xml").read_text(encoding="utf-8"))
+    assert (1, "noExplicitAny", "Unexpected any. Specify a different type.") in out
+    assert (2, "noDebugger", "This is an unexpected use of the debugger statement.") in out
+    assert {code for _, code, _ in out} >= {"noUnusedVariables", "useConst"}
+
+
+def test_biome_parser_empty_stdout_is_no_findings():
+    assert cc._biome_parse("") == []
+
+
+def test_swiftlint_parser_reads_real_fixture():
+    out = cc._gcc_parse((FIXTURES / "swiftlint.txt").read_text(encoding="utf-8"))
+    assert (6, "colon", "Colon Spacing Violation: Colons should be next to the identifier "
+             "when specifying a type and next to the key in dictionary literals") in out
+    assert (5, "identifier_name", "Identifier Name Violation: Function name 'Fetchdata()' "
+             "should start with a lowercase character") in out
+
+
+def test_actionlint_parser_reads_real_fixture():
+    assert cc._actionlint_parse(
+        (FIXTURES / "actionlint.txt").read_text(encoding="utf-8")) == [
+        (7, "shell-name", 'shell name "fish" is invalid. available names are '
+                           '"bash", "pwsh", "python", "sh"')]
+
+
+def test_rubocop_parser_reads_real_fixture():
+    assert cc._rubocop_parse(
+        (FIXTURES / "rubocop.json").read_text(encoding="utf-8")) == [
+        (2, "Lint/UselessAssignment", "Useless assignment to variable - `x`.")]
+    assert cc._rubocop_parse("") == []
+
+
+def test_catalog_dispatch_new_languages(tmp_path):
+    linters = cc.load_linters()
+    ids = lambda p: [lin["id"] for lin in cc.linters_for(p, linters)]  # noqa: E731
+    assert ids(tmp_path / "a.ts") == ["biome"]
+    assert ids(tmp_path / "a.tsx") == ["biome"]
+    assert ids(tmp_path / "a.js") == ["biome"]
+    assert ids(tmp_path / "a.jsx") == ["biome"]
+    assert ids(tmp_path / "a.swift") == ["swiftlint"]
+    assert ids(tmp_path / "a.rb") == ["rubocop"]
+    assert ids(tmp_path / "a.json") == []       # no catalog entry claims json (notice rule C1)
+    assert ids(tmp_path / "compose.yml") == []  # non-workflow yaml never reaches actionlint
+
+
+def test_actionlint_matches_by_workflow_path(tmp_path):
+    linters = cc.load_linters()
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on: push\n")
+    assert [lin["id"] for lin in cc.linters_for(wf, linters)] == ["actionlint"]
+    other = tmp_path / ".github" / "workflows" / "release.yaml"
+    other.write_text("on: push\n")
+    assert [lin["id"] for lin in cc.linters_for(other, linters)] == ["actionlint"]
+
+
+def test_catalog_tiers_and_install_data():
+    cat = {lin["id"]: lin for lin in cc.load_linters()}
+    assert cat["ruff"]["tier"] == "basic" and cat["shellcheck"]["tier"] == "basic"
+    for ident in ("biome", "swiftlint", "rubocop", "actionlint"):
+        assert cat[ident]["tier"] == "polyglot"
+        assert cat[ident]["install"]["manager"] == "brew"
+    assert cat["ruff"]["install"] == {"manager": "pipx", "cmd": ["pipx", "install", "ruff"]}
+    assert cc.install_hint(cat["biome"]) == "brew install biome"
+    assert cc.install_hint({"id": "x", "install": "npm install -g x"}) == "npm install -g x"
+
+
+def _stub_bin(tmp_path, monkeypatch, name, fixture):
+    stub_dir = tmp_path / ("stubs-" + name)
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / name
+    # /bin/cat: the stub must not depend on PATH, which this helper re-points at the stub dir
+    stub.write_text('#!/bin/sh\n/bin/cat "%s"\n' % fixture)
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_dir))
+    monkeypatch.setattr(cc, "EXTRA_PATH", [])
+
+
+def test_stubbed_linters_run_end_to_end(tmp_path, monkeypatch):
+    # biome: real captured XML via a stub binary, filtered to the touched line
+    f = tmp_path / "a.ts"
+    f.write_text("const a: any = 1;\ndebugger;\nlet x =  1;\n")
+    _stub_bin(tmp_path, monkeypatch, "biome", FIXTURES / "biome-checkstyle.xml")
+    _, out = hook(edit_payload(f, "debugger;"))
+    assert "noDebugger" in out and "L2" in out
+
+    # swiftlint: gcc-style parse, rule from the trailing parens
+    s = tmp_path / "a.swift"
+    s.write_text("import Foundation\n\nclass MyVC {\n    var dsfsd = 0\n"
+                 "    func Fetchdata() -> Void {\n        let x:Int = 1\n        print(x)\n"
+                 "    }\n}\n")
+    _stub_bin(tmp_path, monkeypatch, "swiftlint", FIXTURES / "swiftlint.txt")
+    _, out = hook(edit_payload(s, "let x:Int = 1"))
+    assert "L6 colon" in out and "identifier_name" in out
+
+    # rubocop: json parse, cop name as the code, cop prefix stripped from the message
+    r = tmp_path / "a.rb"
+    r.write_text("def f\n  x = 1\nend\ny = 2\nputs y\n")
+    _stub_bin(tmp_path, monkeypatch, "rubocop", FIXTURES / "rubocop.json")
+    _, out = hook(edit_payload(r, "x = 1"))
+    assert "L2 Lint/UselessAssignment" in out and "Useless assignment" in out
+
+
+def test_stubbed_actionlint_gets_the_format_template(tmp_path, monkeypatch):
+    stub_dir = tmp_path / "stubs-actionlint"
+    stub_dir.mkdir()
+    calls = tmp_path / "argv.txt"
+    stub = stub_dir / "actionlint"
+    stub.write_text('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n/bin/cat "%s"\n'
+                    % (calls, FIXTURES / "actionlint.txt"))
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_dir))
+    monkeypatch.setattr(cc, "EXTRA_PATH", [])
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on: push\njobs:\n  b:\n    runs-on: l\n    steps:\n"
+                  "      - run: x\n        shell: fish\n")
+    _, out = hook(edit_payload(wf, "shell: fish"))
+    assert "L7 shell-name" in out
+    argv = calls.read_text()
+    assert "-format" in argv and cc.ACTIONLINT_FORMAT in argv and str(wf) in argv

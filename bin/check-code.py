@@ -16,6 +16,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 VERSION = "0.3.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
@@ -36,9 +37,13 @@ RUFF_DEFAULT_SELECT = "E4,E7,E9,F,B,E722"
 RUFF_CONFIGS = ("ruff.toml", ".ruff.toml")
 
 HELP_EPILOG = """\
-built-in linters (each runs only if installed):
-  python  ruff check          install: pipx install ruff
-  shell   shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
+linters (each runs only if installed):
+  python   ruff check          install: pipx install ruff
+  shell    shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
+  ts/js    biome lint          install: brew install biome         (.ts/.tsx/.js/.jsx)
+  swift    swiftlint           install: brew install swiftlint     (.swift)
+  ruby     rubocop --lint      install: brew install rubocop        (.rb)
+  actions  actionlint          install: brew install actionlint    (.github/workflows/*.ya?ml)
   extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
 built-in checks (always on, no linter needed):
   STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
@@ -141,19 +146,99 @@ def _gcc_parse(stdout):
     return out
 
 
+_ACTIONLINT_RULE = re.compile(r"\[([\w/.-]+)\]\s*$")
+
+# actionlint's default output interleaves code-snippet blocks on stdout, and a snippet source
+# line containing `foo:123:` would itself match _gcc_parse; -format emits finding lines only.
+ACTIONLINT_FORMAT = ('{{range .}}{{printf "%s:%d:%d: %s [%s]" '
+                     '.Filepath .Line .Column .Message .Kind}}{{println}}{{end}}')
+
+
+def _actionlint_parse(stdout):
+    """Parse the -format lines: rules live in trailing [square brackets], not (parens)."""
+    out = []
+    for line_no, code, message in _gcc_parse(stdout):
+        m = _ACTIONLINT_RULE.search(message)
+        if m:
+            code, message = m.group(1), message[:m.start()].strip()
+        out.append((line_no, code, message))
+    return out
+
+
+def _biome_parse(stdout):
+    """Parse biome's checkstyle XML; the rule is the last segment of source
+    (lint/suspicious/noDebugger -> noDebugger)."""
+    out = []
+    for err in ET.fromstring(stdout or "<checkstyle/>").iter("error"):
+        source = err.get("source") or "biome"
+        out.append((int(err.get("line") or 0), source.rsplit("/", 1)[-1],
+                    err.get("message") or ""))
+    return out
+
+
+def _rubocop_parse(stdout):
+    """Parse rubocop's --lint --format json: the code is cop_name; the message
+    repeats the cop as a prefix, which is stripped."""
+    out = []
+    for f in json.loads(stdout or "{}").get("files", []):
+        for off in f.get("offenses", []):
+            code = off.get("cop_name") or "Lint"
+            message = off.get("message") or ""
+            if message.startswith(code + ": "):
+                message = message[len(code) + 2:]
+            out.append(((off.get("location") or {}).get("line", 0), code, message))
+    return out
+
+
+# The catalog: every entry is VERIFIED to lint one file with machine-parseable output
+# (see docs/plans/2026-10-28-setup-tiers-and-coverage-notice.md, verification record).
+# tier: basic = ruff+shellcheck, polyglot = everything; local user linters are always in tier.
+# install names the package manager setup drives (never sudo). rubocop via brew, not gem:
+# Homebrew ruby's gem bin dir is off PATH, so a gem install could never verify by outcome.
 BUILTIN = [
-    {"id": "ruff", "language": "Python", "binary": "ruff", "install": "pipx install ruff",
+    {"id": "ruff", "language": "Python", "binary": "ruff", "tier": "basic",
+     "install": {"manager": "pipx", "cmd": ["pipx", "install", "ruff"]},
      "ext": ["py", "pyi"], "shebang": r"python[0-9.]*\b",
      "command": _ruff_command, "parse": _ruff_parse},
-    {"id": "shellcheck", "language": "shell", "binary": "shellcheck",
-     "install": "brew install shellcheck", "ext": ["sh", "bash", "ksh"],
-     "shebang": r"\b(?:ba|k|da)?sh\b", "command": _shellcheck_command,
-     "parse": _shellcheck_parse},
+    {"id": "shellcheck", "language": "shell", "binary": "shellcheck", "tier": "basic",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "shellcheck"]},
+     "ext": ["sh", "bash", "ksh"], "shebang": r"\b(?:ba|k|da)?sh\b",
+     "command": _shellcheck_command, "parse": _shellcheck_parse},
+    {"id": "biome", "language": "TS/JS", "binary": "biome", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "biome"]},
+     "ext": ["ts", "tsx", "js", "jsx"], "shebang": None,
+     "command": lambda path: ["biome", "lint", "--reporter=checkstyle", str(path)],
+     "parse": _biome_parse},
+    {"id": "swiftlint", "language": "Swift", "binary": "swiftlint", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "swiftlint"]},
+     "ext": ["swift"], "shebang": None,
+     "command": lambda path: ["swiftlint", "lint", "--no-cache", str(path)],
+     "parse": _gcc_parse},
+    {"id": "rubocop", "language": "Ruby", "binary": "rubocop", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "rubocop"]},
+     "ext": ["rb"], "shebang": None,
+     # --lint = the Lint department: the pinned conservative error-cop set, as ruff is pinned.
+     "command": lambda path: ["rubocop", "--lint", "--format", "json", str(path)],
+     "parse": _rubocop_parse},
+    {"id": "actionlint", "language": "Actions", "binary": "actionlint", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "actionlint"]},
+     "ext": [], "shebang": None,
+     # matched by path, never by yml/yaml extension: actionlint would "lint" any yaml as a
+     # broken workflow (verified on a docker-compose file)
+     "path_regex": r"\.github/workflows/[^/]+\.ya?ml$",
+     "command": lambda path: ["actionlint", "-format", ACTIONLINT_FORMAT, str(path)],
+     "parse": _actionlint_parse},
 ]
 
 
+def install_hint(linter):
+    """Display form of the install command (local linters carry a plain string)."""
+    install = linter.get("install") or ""
+    return install if isinstance(install, str) else " ".join(install.get("cmd", []))
+
+
 def load_linters():
-    """Built-ins plus user linters from linters.local.json (same fields; command is a list
+    """Catalog plus user linters from linters.local.json (same fields; command is a list
     with "{file}" as the placeholder, output parsed as gcc-style lines)."""
     linters = [dict(item) for item in BUILTIN]
     local = _load_json(config_home() / "linters.local.json", {})
@@ -165,7 +250,8 @@ def load_linters():
         linters.append({
             "id": entry["id"], "language": entry.get("language", entry["id"]),
             "binary": entry.get("binary", template[0]), "install": entry.get("install", ""),
-            "ext": [e.lstrip(".") for e in entry.get("ext", [])], "shebang": entry.get("shebang"),
+            "tier": "local", "ext": [e.lstrip(".") for e in entry.get("ext", [])],
+            "shebang": entry.get("shebang"),
             "command": (lambda path, t=template: [str(path) if p == "{file}" else p for p in t]),
             "parse": _gcc_parse})
     return [lin for lin in linters if lin["id"] not in disabled]
@@ -185,6 +271,11 @@ def linters_for(path, linters):
     shebang = None
     hits = []
     for linter in linters:
+        path_re = linter.get("path_regex")
+        if path_re:  # path-matched entries (e.g. workflow files) ignore ext and shebang
+            if re.search(path_re, str(path)):
+                hits.append(linter)
+            continue
         if ext and ext in linter["ext"]:
             hits.append(linter)
         elif not ext and linter.get("shebang"):
@@ -521,7 +612,7 @@ def check_edit(payload):
         if _note_once(session_id, "missing:" + lin["id"]):
             return ("check-code: %s edits are not being checked -- %s is not installed (%s). "
                     "Tell the user once; installing is their call." % (lin["language"], lin["binary"],
-                                                                        lin["install"]))
+                                                                        install_hint(lin)))
         return ""
     for linter in installed:
         for line, code, message in run_linter(linter, path):
@@ -569,7 +660,7 @@ def cmd_check(args):
         return 0
     for linter in linters:
         if not find_binary(linter["binary"]):
-            print("%s: not installed (%s)" % (linter["id"], linter["install"]))
+            print("%s: not installed (%s)" % (linter["id"], install_hint(linter)))
             continue
         for line, code, message in sorted(run_linter(linter, path)):
             print("%s:%d %s %s" % (path.name, line, code, message))

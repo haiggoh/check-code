@@ -1,0 +1,4 @@
+/private/tmp/cc-probe/bad.swift:6:14: warning: Colon Spacing Violation: Colons should be next to the identifier when specifying a type and next to the key in dictionary literals (colon)
+/private/tmp/cc-probe/bad.swift:5:10: error: Identifier Name Violation: Function name 'Fetchdata()' should start with a lowercase character (identifier_name)
+/private/tmp/cc-probe/bad.swift:6:13: error: Identifier Name Violation: Variable name 'x' should be between 3 and 40 characters long (identifier_name)
+/private/tmp/cc-probe/bad.swift:5:21: warning: Redundant Void Return Violation: Returning Void in a function declaration is redundant (redundant_void_return)

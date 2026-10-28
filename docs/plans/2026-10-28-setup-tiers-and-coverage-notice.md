@@ -99,3 +99,28 @@ surface (`.claude-plugin/plugin.json`, CHANGELOG; grep for any other).
 
 Rust per-file linting; new hooks (no SessionStart notice, nothing beyond the existing PostToolUse);
 installing anything without explicit confirmation; changing built-in checks.
+
+## Verification record (2026-10-28, build session)
+
+All four candidates were installed and run on scratch files; **all four PASS** and enter the catalog.
+Real outputs are committed under `tests/fixtures/`. Verified commands and the decisions behind them:
+
+| linter | verified command | output |
+|---|---|---|
+| biome 2.6.3 | `biome lint --reporter=checkstyle FILE` | checkstyle XML on stdout (pure — the run summary is stderr). `lint`, not `check`: `check` adds a line-0 "Formatter would have printed…" complaint that cannot honour touched-lines filtering. Zero-config; a repo `biome.json` wins. |
+| swiftlint 0.65.1 | `swiftlint lint --no-cache FILE` | gcc-style `path:line:col: severity: message (rule)` on stdout (preamble is stderr); the existing `_gcc_parse` reads it natively. 0.65 removed `--path` — paths are positional. `--no-cache` keeps the repo clean. |
+| rubocop 1.92.1 | `rubocop --lint --format json FILE` | pure JSON on stdout (the pending-cops advisory is stderr-only). `--lint` = the Lint department: the pinned conservative set of error-class cops, the ruff analogy. Install is **`brew install rubocop`, NOT `gem install`**: Homebrew ruby's gem bin dir is off PATH, so setup's verify-by-outcome would report FAILED forever; the brew formula lands in `/opt/homebrew/bin`. |
+| actionlint 1.7.12 | `actionlint -format '<printf/println template>' FILE` | pure `file:line:col: message [rule]` lines. The template is required: default output interleaves code-snippet blocks **on stdout**, and a snippet source line containing `foo:123:` would itself match `_gcc_parse` and fake a finding. Rules are in `[square brackets]`, so it gets a small dedicated parser. |
+
+Decisions taken during verification:
+
+- **biome covers TS/JS only** (`ts,tsx,js,jsx`), not JSON: notice rule C1 names `.json` as always-silent,
+  so no catalog entry may claim it.
+- **No shebang matchers for the new entries** — verified biome silently lints nothing on a
+  shebang-only file (empty XML despite a `debugger` on line 2); ext-only matches what was verified.
+- **actionlint matches by path** (`\.github/workflows/.*\.ya?ml$`), never by extension — verified it
+  "lints" a docker-compose file as a broken workflow (3 false errors), so `yml`/`yaml` extension
+  matching would misfire on every non-workflow YAML edit.
+- Rust stays absent (design §A): clippy lints a crate, not a file — README says so instead of
+  shipping a fake per-file check.
+
