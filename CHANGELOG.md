@@ -4,12 +4,16 @@
 
 - **A setup route, preferred to on-demand nagging**: `check-code.py setup` (the menu on a TTY;
   `--tier basic|polyglot|none [--yes] [--dry-run]` for scripts) installs a coverage tier up front
-  and records it in `$CHECK_CODE_HOME/config.json`. The plan is always shown before acting — per
-  linter `already installed` / `will install` (the exact command) / `cannot install here` (why,
-  plus the command to run yourself) — installs run through the package manager the catalog names
-  (`brew`, `pipx`) and never `sudo`, and each install is verified **by outcome** (the binary is
-  re-resolved: `installed` / `FAILED`), not by exit code. `--dry-run` parses arguments before any
-  side effect and changes nothing; a missing package manager prints the command and continues.
+  and records it in `$CHECK_CODE_HOME/config.json`. **polyglot is the default, opt-out** (owner
+  decision 2026-10-29): the menu's Enter and a bare `setup --yes` both choose it, and `basic` /
+  `none` are opt-ins for users who know they will not touch those languages — the installs are
+  small, and being prepared beats discovering a missing linter mid-edit. The plan is always shown
+  before acting — per linter `already installed` / `will install` (the exact command) /
+  `cannot install here` (why, plus the command to run yourself) — installs run through the package
+  manager the catalog names (`brew`, `pipx`) and never `sudo`, and each install is verified **by
+  outcome** (the binary is re-resolved: `installed` / `FAILED`), not by exit code. `--dry-run`
+  parses arguments before any side effect and changes nothing; a missing package manager prints
+  the command and continues.
 - **Four new catalog linters**, each verified against the real tool before entering (real outputs
   committed as fixtures; `docs/plans/2026-10-28-setup-tiers-and-coverage-notice.md` holds the
   verification record): biome (TS/JS, `biome lint --reporter=checkstyle`), swiftlint (Swift,

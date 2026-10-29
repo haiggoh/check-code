@@ -37,6 +37,10 @@ RUFF_DEFAULT_SELECT = "E4,E7,E9,F,B,E722"
 RUFF_CONFIGS = ("ruff.toml", ".ruff.toml")
 CONFIG_FILE = "config.json"       # written by `setup`: {"tier": "basic"|"polyglot"|"none"}
 TIERS = ("basic", "polyglot", "none")
+# Owner decision 2026-10-29: polyglot is the DEFAULT, opt-out -- installs are small, and being
+# prepared beats discovering a missing linter mid-edit. basic/none stay opt-in for users who
+# know they will not use those languages.
+DEFAULT_TIER = "polyglot"
 
 HELP_EPILOG = """\
 linters (each runs only if installed):
@@ -48,8 +52,9 @@ linters (each runs only if installed):
   actions  actionlint          install: brew install actionlint    (.github/workflows/*.ya?ml)
   extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
 setup (the preferred way to get them):
-  setup --tier basic     ruff + shellcheck (today's built-ins)
-  setup --tier polyglot  basic + biome, swiftlint, rubocop, actionlint
+  setup --tier polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint -- the
+                         recommended default: Enter in the menu, and what 'setup --yes' installs
+  setup --tier basic     ruff + shellcheck only (opt in if you know you will not touch the rest)
   setup --tier none      no external linters; built-in checks stay on, coverage notices go quiet
   Run it in a terminal for the menu; --dry-run shows the plan without changing anything.
   The chosen tier is recorded in $CHECK_CODE_HOME/config.json ("setup --help" has the details).
@@ -713,22 +718,27 @@ INSTALL_TIMEOUT = 600  # seconds per install command (a brew bottle can be large
 SETUP_MENU = """\
 check-code setup — choose linter coverage
 
-  1) basic     ruff + shellcheck: Python and shell
-  2) polyglot  basic + biome, swiftlint, rubocop, actionlint: also TS/JS, Swift, Ruby, GitHub Actions
+  1) polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint: Python, shell, TS/JS,
+               Swift, Ruby, GitHub Actions -- recommended, and the default (Enter)
+  2) basic     ruff + shellcheck only: Python and shell
   3) none      no external linters; built-in checks still run and coverage notices stay silent
 
-  Enter = basic    q) Quit
+  Enter = polyglot    q) Quit
 """
 
 SETUP_EPILOG = """\
 tiers:
-  basic     ruff + shellcheck (Python, shell)
-  polyglot  basic + biome, swiftlint, rubocop, actionlint (TS/JS, Swift, Ruby, GitHub Actions)
+  polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint (Python, shell, TS/JS,
+            Swift, Ruby, GitHub Actions) -- the recommended default: Enter in the menu, and
+            what 'setup --yes' installs when --tier is not given
+  basic     ruff + shellcheck (Python, shell) -- opt in if you know you will not touch the
+            polyglot languages
   none      no external linters: built-in checks still run and coverage notices stay silent
-interactive (stdin is a TTY): choose a tier, see the plan, confirm. Installs use the package
-manager the catalog names (brew, pipx) and never sudo; a missing package manager prints the
-command to run yourself instead of failing. After each install the binary is re-resolved, so
-the report is installed / already present / FAILED, not the installer's exit code.
+interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
+plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
+a missing package manager prints the command to run yourself instead of failing. After each
+install the binary is re-resolved, so the report is installed / already present / FAILED, not
+the installer's exit code.
 environment:
   CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
                     (default ~/.claude/check-code)
@@ -807,13 +817,13 @@ def _confirm(count, read_line=None):
 
 def _prompt_tier(read_line=None):
     """Interactive tier choice: numbers = actions, letters = navigation, Enter = the shown
-    default. Returns the tier, or None when the user quits."""
+    default (polyglot). Returns the tier, or None when the user quits."""
     read_line = read_line or input
     print(SETUP_MENU)
-    choices = {"1": "basic", "2": "polyglot", "3": "none", "": "basic"}
+    choices = {"1": "polyglot", "2": "basic", "3": "none", "": DEFAULT_TIER}
     while True:
         try:
-            answer = read_line("choose 1, 2, 3 [Enter = basic, q = quit]: ").strip().lower()
+            answer = read_line("choose 1, 2, 3 [Enter = polyglot, q = quit]: ").strip().lower()
         except EOFError:
             return None
         if answer in ("q", "quit"):
@@ -824,15 +834,22 @@ def _prompt_tier(read_line=None):
 
 
 def cmd_setup(args):
-    tier = args.tier
-    if tier is None:
-        if not _isatty():
-            print("setup: the menu needs a TTY; pass --tier basic|polyglot|none", file=sys.stderr)
+    if args.dry_run:
+        tier = args.tier or DEFAULT_TIER   # a probe looks at the default's plan; changes nothing
+    elif args.tier is None:
+        if _isatty() and not args.yes:
+            tier = _prompt_tier()      # the menu: Enter = polyglot, the opt-out default
+            if tier is None:
+                print("nothing changed")
+                return 0
+        elif args.yes:
+            tier = DEFAULT_TIER        # confirmed by --yes: the recommended default
+        else:
+            print("setup: the menu needs a TTY; pass --tier basic|polyglot|none with --yes "
+                  "for scripts", file=sys.stderr)
             return 2
-        tier = _prompt_tier()
-        if tier is None:
-            print("nothing changed")
-            return 0
+    else:
+        tier = args.tier
     plan = setup_plan(tier)
     _print_plan(tier, plan)
     if args.dry_run:
@@ -934,7 +951,7 @@ def main(argv=None):
                        description="Install the linters of a coverage tier and record it in "
                                    "$CHECK_CODE_HOME/config.json. Never uses sudo.",
                        epilog=SETUP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
-    s.add_argument("--tier", choices=TIERS, help="basic | polyglot | none")
+    s.add_argument("--tier", choices=TIERS, help="basic | polyglot | none (default: polyglot)")
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--dry-run", action="store_true",
                    help="print the plan and change nothing")

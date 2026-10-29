@@ -40,6 +40,9 @@ check-code.py setup --tier basic|polyglot|none [--yes] [--dry-run]
     missing-linter notice is silenced permanently.
 - **Interactive UX** follows the house rules: the question first and at full emphasis, selectable
   choices, numbers = actions, letters = navigation (`q` quit), Enter = the shown default (`basic`).
+  *(Superseded by owner decision 2026-10-29: the shown default is **polyglot** — recommended and
+  opt-out, since the installs are small and being prepared beats discovering a gap mid-edit;
+  `basic`/`none` are opt-ins. A bare `setup --yes` (no `--tier`) also resolves to polyglot.)*
   Show the PLAN before acting: for each linter, already-installed / will-install (exact command) /
   cannot-install-here (why, plus the command to run yourself).
 - **Install**, only after confirmation (`--yes` for scripts), using the package manager the entry names

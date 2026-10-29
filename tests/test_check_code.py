@@ -1037,19 +1037,56 @@ def test_setup_requires_yes_when_not_a_tty(monkeypatch, capsys):
     assert rc == 2 and "yes" in capsys.readouterr().err.lower()
 
 
-def test_setup_menu_enter_is_basic_and_q_quits(capsys):
+def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, capsys):
+    # the owner's default is opt-out: `setup --yes` with no --tier = confirmed polyglot
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    installed = set()
+    monkeypatch.setattr(cc, "find_binary",
+                        lambda n: "/bin/" + n
+                        if (n in installed or n in ("brew", "pipx")) else None)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        installed.add(cmd[-1])
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", fake_run)
+    rc = cc.cmd_setup(setup_args(None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"],
+                     ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
+                     ["brew", "install", "rubocop"], ["brew", "install", "actionlint"]]
+    assert _config() == {"tier": "polyglot"}
+    assert "installed: /bin/actionlint" in out
+
+
+def test_setup_bare_non_tty_run_still_refuses(monkeypatch, capsys):
+    # no --tier, no --yes, no TTY: nothing is confirmed, so nothing happens
+    _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    rc = cc.cmd_setup(setup_args(None, yes=False))
+    assert rc == 2 and not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_menu_enter_is_the_shown_default_and_q_quits(capsys):
     lines = iter(["", "2", "q", "3"])
     read = lambda prompt="": next(lines)   # noqa: E731
-    assert cc._prompt_tier(read) == "basic"
-    assert cc._prompt_tier(read) == "polyglot"
+    assert cc._prompt_tier(read) == "polyglot"   # Enter = the shown default (owner: opt-out)
+    assert cc._prompt_tier(read) == "basic"      # 2 = opt-in
     assert cc._prompt_tier(read) is None
     assert cc._prompt_tier(read) == "none"
 
 
 def test_setup_menu_reprompts_on_garbage(capsys):
     lines = iter(["banana", "1"])
-    assert cc._prompt_tier(lambda prompt="": next(lines)) == "basic"
+    assert cc._prompt_tier(lambda prompt="": next(lines)) == "polyglot"
     assert "1, 2, 3" in capsys.readouterr().out
+
+
+def test_setup_menu_shows_polyglot_first_as_the_default():
+    assert "Enter = polyglot" in cc.SETUP_MENU
+    assert cc.SETUP_MENU.index("polyglot") < cc.SETUP_MENU.index("basic")
 
 
 # ---------------------------------------------------------------- setup CLI (real subprocess)
@@ -1070,6 +1107,13 @@ def test_setup_usage_errors_exit_2():
 def test_setup_dry_run_via_cli_writes_nothing():
     r = cli("setup", "--tier", "polyglot", "--dry-run")
     assert r.returncode == 0 and "dry run" in r.stdout
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_dry_run_without_a_tier_shows_the_default_plan():
+    # a probe with no --tier and no TTY still sees a plan (the polyglot default) and writes nothing
+    r = cli("setup", "--dry-run")
+    assert r.returncode == 0 and "tier: polyglot" in r.stdout and "dry run" in r.stdout
     assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
 
 

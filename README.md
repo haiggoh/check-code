@@ -57,25 +57,28 @@ Rust check is worse than none.
 
 ```
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup                  # interactive menu
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --tier polyglot  # scripted
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --yes            # scripted: polyglot
 ```
 
 | Tier | Installs | Covers |
 |---|---|---|
-| `basic` | ruff, shellcheck | Python and shell |
-| `polyglot` | basic + biome, swiftlint, rubocop, actionlint | also TS/JS, Swift, Ruby, GitHub Actions workflows |
-| `none` | nothing | built-in checks only; coverage notices stay silent |
+| `polyglot` — the default, recommended | ruff, shellcheck, biome, swiftlint, rubocop, actionlint | Python, shell, TS/JS, Swift, Ruby, GitHub Actions workflows |
+| `basic` — opt in | ruff, shellcheck | Python and shell |
+| `none` — opt in | nothing | built-in checks only; coverage notices stay silent |
 
-When stdin is a TTY the menu asks first (numbers = choices, Enter = the shown default `basic`,
-`q` = quit), then shows the **plan** before touching anything: per linter, `already installed` /
-`will install` (the exact command) / `cannot install here` (why, plus the command to run yourself).
-Installs run only after confirmation — `--yes` for scripts, `--dry-run` to look without changing
-anything — through the package manager the catalog names (`brew`, `pipx`); never `sudo`, never a
-system-package override. A missing package manager prints the command and continues. Each install
-is then verified **by outcome**: the binary is re-resolved, so the report says `installed` /
-`FAILED`, not whatever the installer's exit code claimed. The chosen tier is recorded in
-`$CHECK_CODE_HOME/config.json`; re-running `setup` is idempotent and may change it — `doctor`
-shows the current one.
+**polyglot is the default and opting out is yours.** The installs are small and being prepared
+beats discovering a missing linter mid-edit; choose `basic` or `none` only if you know you will
+not touch those languages. When stdin is a TTY the menu asks first (numbers = choices,
+`Enter` = the shown default `polyglot`, `q` = quit), then shows the **plan** before touching
+anything: per linter, `already installed` / `will install` (the exact command) /
+`cannot install here` (why, plus the command to run yourself). Installs run only after
+confirmation — `--yes` for scripts (with no `--tier`, that means the polyglot default),
+`--dry-run` to look without changing anything — through the package manager the catalog names
+(`brew`, `pipx`); never `sudo`, never a system-package override. A missing package manager prints
+the command and continues. Each install is then verified **by outcome**: the binary is
+re-resolved, so the report says `installed` / `FAILED`, not whatever the installer's exit code
+claimed. The chosen tier is recorded in `$CHECK_CODE_HOME/config.json`; re-running `setup` is
+idempotent and may change it — `doctor` shows the current one.
 
 ## Built-in checks
 
@@ -137,12 +140,14 @@ Through the haiggoh marketplace (get-haiggoh), or:
 Requires `python3` 3.9+. Then pick your coverage — one run, not per-package installs:
 
 ```
-python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --tier polyglot
+python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --yes   # polyglot: the default
 ```
 
-`basic` (ruff + shellcheck) is enough for Python and shell work; `polyglot` adds biome,
-swiftlint, rubocop and actionlint for TS/JS, Swift, Ruby and GitHub Actions; `none` deliberately
-runs no external linter. The hook works before this too — see Setup for what each tier covers.
+`polyglot` (ruff + shellcheck + biome, swiftlint, rubocop, actionlint) is the recommended
+default — Python, shell, TS/JS, Swift, Ruby and GitHub Actions covered, installs kept small on
+purpose. `basic` (ruff + shellcheck) is the opt-in if you know you will not touch the other
+languages, and `none` deliberately runs no external linter. The hook works before this too —
+see Setup for what each tier covers.
 
 ## How it relates to other review tools
 
