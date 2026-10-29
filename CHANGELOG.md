@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.3.2] - 2026-10-29
+
+- Tightened from the independent final review (DeepSeek V4.1 Flash dispatch): the findings
+  header now has an exact-string pin on the formatter seam — mutation-checked, the reworded
+  body fails it while the earlier prefix assertion let a rewording through — and the SKILL.md
+  branding line is scoped to turns where the findings report actually fired, not every reply
+  under the skill (no mark on an all-clear turn).
+
 ## [0.3.1] - 2026-10-28
 
 - Branding: the findings report now leads with the 🩻 check-code identity mark — its credit

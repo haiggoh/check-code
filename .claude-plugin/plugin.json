@@ -1,6 +1,6 @@
 {
   "name": "check-code",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "🩻🔬 Lints the lines Claude just edited and feeds findings straight back, so they get fixed in the same turn. Runs only linters you already have (ruff, shellcheck, plus any you add), respects the repo's own config, reports only touched lines, never blocks an edit, and costs nothing when the edit is clean. Five built-in pattern checks (stderr-pipe deadlocks, missing --help, hardcoded machine paths, SKILL.md bloat, menu grammar) run without any linter installed.",
   "author": { "name": "Heiko Brantsch" },
   "homepage": "https://github.com/haiggoh/check-code",

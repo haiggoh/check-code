@@ -622,3 +622,13 @@ def test_findings_header_leads_with_the_branding_mark(tmp_path):
     _, out = hook(write_payload(f, session="brand1"))
     assert out.splitlines()[0].startswith("🩻 check-code: ")
     assert "issue(s) in" in out and "NO-HELP" in out
+
+
+def test_findings_header_exact_string(tmp_path):
+    # Exact-string pin on the formatter seam: synthetic findings, so the header is
+    # deterministic and independent of which linters this machine happens to have.
+    out = cc._format_findings([(1, "NO-HELP", "msg")], None, tmp_path / "do-thing.sh")
+    assert out.splitlines()[0] == (
+        "🩻 check-code: 1 issue(s) in the file you just wrote, do-thing.sh (as of THIS edit -- "
+        "a sibling edit in the same batch may already fix them) -- fix them now, or say why a "
+        "finding is intentional:")

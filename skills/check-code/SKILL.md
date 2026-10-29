@@ -77,6 +77,6 @@ The command must print `file:line[:col]: message [(rule)]` lines (most linters h
 
 ## Branding (🩻🔬)
 
-The findings report already leads with the 🩻 check-code mark — that is its credit moment, the
-instant it just caught something. When you work under this skill, lead your first substantive
-reply the same way so the user can see which plugin is speaking.
+The findings report leads with the 🩻 check-code mark — its credit moment, the instant it just
+caught something. When the report fired and you continue under this skill, lead your first
+substantive reply with 🩻 check-code: too; on turns with nothing flagged, no mark.
