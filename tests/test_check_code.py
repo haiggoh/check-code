@@ -842,6 +842,7 @@ def test_c3_notice_once_per_session_in_total(tmp_path, monkeypatch):
     first = hook(edit_payload(f, "x = 1", session="n"))[1]
     assert ".py edits are not linted" in first and '"check-code.py setup"' in first
     assert '"setup --tier none"' in first
+    assert not first.startswith("🩻")   # 0.3.1: the notice stays unbranded (credit-moments rule)
     # once per session in TOTAL, not per language: a different language stays silent
     t = tmp_path / "b.ts"
     t.write_text("const a = 1;\n")
