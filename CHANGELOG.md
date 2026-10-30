@@ -7,7 +7,7 @@
   first 15 lines saying "sourced by" / "not executable on its own"). The sourced-library claim is
   read from the header only, so a runnable script that mentions it deep in the body is still flagged.
 
-## [0.3.2] - 2026-10-29
+## [0.3.2] - 2026-10-29 — 🩻 review follow-up: exact pin + scoped skill line
 
 - Tightened from the independent final review (DeepSeek V4.1 Flash dispatch): the findings
   header now has an exact-string pin on the formatter seam — mutation-checked, the reworded
