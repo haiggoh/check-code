@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3] - 2026-10-30
+
+- NO-HELP no longer fires on files nobody runs by hand: pytest-collected tests (a `test_*.py` /
+  `*_test.py` name, or any file under a `tests/` directory) and sourced libraries (a header in the
+  first 15 lines saying "sourced by" / "not executable on its own"). The sourced-library claim is
+  read from the header only, so a runnable script that mentions it deep in the body is still flagged.
+
 ## [0.3.2] - 2026-10-29
 
 - Tightened from the independent final review (DeepSeek V4.1 Flash dispatch): the findings

@@ -413,6 +413,48 @@ def test_write_py_module_stays_quiet(tmp_path):
     assert "NO-HELP" not in out
 
 
+def test_write_pytest_file_under_tests_dir_stays_quiet(tmp_path):
+    # pytest collects it; nobody runs it by hand, so --help would be meaningless
+    d = tmp_path / "tests"
+    d.mkdir()
+    f = d / "test_thing.py"
+    f.write_text("#!/usr/bin/env python3\ndef test_x():\n    pass\n\n"
+                 "if __name__ == \"__main__\":\n    test_x()\n")
+    _, out = hook(write_payload(f, session="h6a"))
+    assert "NO-HELP" not in out
+
+
+def test_write_test_named_py_outside_tests_dir_stays_quiet(tmp_path):
+    f = tmp_path / "test_thing.py"
+    f.write_text("#!/usr/bin/env python3\nif __name__ == \"__main__\":\n    pass\n")
+    _, out = hook(write_payload(f, session="h6b"))
+    assert "NO-HELP" not in out
+
+
+def test_write_sourced_library_header_stays_quiet(tmp_path):
+    f = tmp_path / "lib.sh"
+    f.write_text("#!/bin/bash\n# Shared helpers -- sourced by launch.sh, not executable on its own.\n"
+                 "helper() { echo hi; }\n")
+    _, out = hook(write_payload(f, session="h6c"))
+    assert "NO-HELP" not in out
+
+
+def test_sourced_mention_deep_in_body_does_not_exempt(tmp_path):
+    # the exemption reads the HEADER only: a script that merely mentions 'sourced by'
+    # far down is still a runnable script and must still be flagged
+    f = tmp_path / "run.sh"
+    f.write_text("#!/bin/bash\n" + "echo step\n" * 30 + "# note: sourced by nobody\n")
+    _, out = hook(write_payload(f, session="h6d"))
+    assert "NO-HELP" in out
+
+
+def test_tests_in_name_but_not_a_dir_component_still_flagged(tmp_path):
+    f = tmp_path / "mytests-runner.sh"
+    f.write_text("#!/bin/bash\necho go\n")
+    _, out = hook(write_payload(f, session="h6e"))
+    assert "NO-HELP" in out
+
+
 def test_write_markdown_stays_quiet(tmp_path):
     f = tmp_path / "notes.md"
     f.write_text("# notes\n")

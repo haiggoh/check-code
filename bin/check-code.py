@@ -18,7 +18,7 @@ import tempfile
 import time
 from pathlib import Path
 
-VERSION = "0.3.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.3.3"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -257,6 +257,10 @@ NO_HELP_MESSAGE = (
 HELP_SIGNALS = ("argparse", "optparse", "getopt", "getopts", "click", "typer", "docopt",
                 "sys.argv", "--help", "$#", "usage")
 SCRIPT_EXTS = {"py", "sh", "bash", "ksh", "zsh"}
+# a script that declares itself a sourced library, in its first lines, is not run by hand
+SOURCED_HEADER_LINES = 15
+SOURCED_MARKERS = ("sourced by", "not executable on its own", "meant to be sourced",
+                   "source this file")
 
 HARDCODED_PATH_MESSAGE = (
     "hardcoded machine-specific path in a committed file: it is wrong for every other reader "
@@ -366,9 +370,24 @@ def _stderr_pipe_lines(content):
     return lines
 
 
+def _not_meant_to_run(path, content):
+    """True for files nobody invokes by hand, so --help would be meaningless: pytest-collected
+    tests and sourced libraries. The sourced-library claim is read from the HEADER only --
+    a body comment that merely mentions 'sourced by' must not exempt a runnable script."""
+    name = path.name.lower()
+    if (name.startswith("test_") and name.endswith(".py")) or name.endswith("_test.py"):
+        return True
+    if any(part.lower() in ("tests", "test") for part in path.parent.parts):
+        return True
+    header = "\n".join(content.splitlines()[:SOURCED_HEADER_LINES]).lower()
+    return any(marker in header for marker in SOURCED_MARKERS)
+
+
 def _is_new_script(path, content, shebang):
     ext = path.suffix.lstrip(".").lower()
     if ext not in SCRIPT_EXTS and not shebang:
+        return False
+    if _not_meant_to_run(path, content):
         return False
     pythonish = ext == "py" or "python" in shebang
     if pythonish and not shebang and "__main__" not in content:
