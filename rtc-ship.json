@@ -9,5 +9,6 @@
 
 
 
-  "refresh_plugin": "check-code"
+  "refresh_plugin": "check-code",
+  "require_default_branch_checkout": true
 }

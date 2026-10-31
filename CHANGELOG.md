@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1] — 2026-10-31
+
+### Changed
+- The plugin description (plugin.json, and the marketplace listing it feeds) is rewritten to describe
+  the plugin's full current capabilities.
+
 ## [0.4.0] - 2026-10-31
 
 - **A setup route, preferred to on-demand nagging**: `check-code.py setup` (the menu on a TTY;
