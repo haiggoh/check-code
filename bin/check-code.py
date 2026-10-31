@@ -16,9 +16,10 @@ import subprocess
 import sys
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.3.3"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.0"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -34,12 +35,29 @@ SHELLCHECK_DEFAULT_EXCLUDE = "SC1091,SC2016,SC2034"
 # and runtime errors, pyflakes, bugbear, bare except.
 RUFF_DEFAULT_SELECT = "E4,E7,E9,F,B,E722"
 RUFF_CONFIGS = ("ruff.toml", ".ruff.toml")
+CONFIG_FILE = "config.json"       # written by `setup`: {"tier": "basic"|"polyglot"|"none"}
+TIERS = ("basic", "polyglot", "none")
+# Owner decision 2026-10-29: polyglot is the DEFAULT, opt-out -- installs are small, and being
+# prepared beats discovering a missing linter mid-edit. basic/none stay opt-in for users who
+# know they will not use those languages.
+DEFAULT_TIER = "polyglot"
 
 HELP_EPILOG = """\
-built-in linters (each runs only if installed):
-  python  ruff check          install: pipx install ruff
-  shell   shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
+linters (each runs only if installed):
+  python   ruff check          install: pipx install ruff
+  shell    shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
+  ts/js    biome lint          install: brew install biome         (.ts/.tsx/.js/.jsx)
+  swift    swiftlint           install: brew install swiftlint     (.swift)
+  ruby     rubocop --lint      install: brew install rubocop        (.rb)
+  actions  actionlint          install: brew install actionlint    (.github/workflows/*.ya?ml)
   extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
+setup (the preferred way to get them):
+  setup --tier polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint -- the
+                         recommended default: Enter in the menu, and what 'setup --yes' installs
+  setup --tier basic     ruff + shellcheck only (opt in if you know you will not touch the rest)
+  setup --tier none      no external linters; built-in checks stay on, coverage notices go quiet
+  Run it in a terminal for the menu; --dry-run shows the plan without changing anything.
+  The chosen tier is recorded in $CHECK_CODE_HOME/config.json ("setup --help" has the details).
 built-in checks (always on, no linter needed):
   STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
   NO-HELP      a Write of a new script file with no argument parsing / --help handling
@@ -94,6 +112,24 @@ def _has_tool_ruff(path):
         return False
 
 
+def recorded_tier():
+    """The tier setup recorded in $CHECK_CODE_HOME/config.json, or None when setup never
+    ran. An invalid recorded value reads as None here (it is not a choice the user made);
+    doctor reports it loudly instead."""
+    value = _load_json(config_home() / CONFIG_FILE, {}).get("tier")
+    return value if value in TIERS else None
+
+
+def tier_covers(recorded, entry_tier):
+    """Does the recorded tier include a linter of entry_tier? User linters ('local') are
+    always in tier."""
+    if recorded == "none":
+        return False
+    if entry_tier == "local" or recorded == "polyglot":
+        return True
+    return entry_tier == "basic"
+
+
 # ---------------------------------------------------------------- linters
 
 def _ruff_command(path):
@@ -141,19 +177,103 @@ def _gcc_parse(stdout):
     return out
 
 
+_ACTIONLINT_RULE = re.compile(r"\[([\w/.-]+)\]\s*$")
+
+# actionlint's default output interleaves code-snippet blocks on stdout, and a snippet source
+# line containing `foo:123:` would itself match _gcc_parse; -format emits finding lines only.
+ACTIONLINT_FORMAT = ('{{range .}}{{printf "%s:%d:%d: %s [%s]" '
+                     '.Filepath .Line .Column .Message .Kind}}{{println}}{{end}}')
+
+
+def _actionlint_parse(stdout):
+    """Parse the -format lines: rules live in trailing [square brackets], not (parens)."""
+    out = []
+    for line_no, code, message in _gcc_parse(stdout):
+        m = _ACTIONLINT_RULE.search(message)
+        if m:
+            code, message = m.group(1), message[:m.start()].strip()
+        out.append((line_no, code, message))
+    return out
+
+
+def _biome_parse(stdout):
+    """Parse biome's checkstyle XML; the rule is the last segment of source
+    (lint/suspicious/noDebugger -> noDebugger)."""
+    out = []
+    for err in ET.fromstring(stdout or "<checkstyle/>").iter("error"):
+        source = err.get("source") or "biome"
+        out.append((int(err.get("line") or 0), source.rsplit("/", 1)[-1],
+                    err.get("message") or ""))
+    return out
+
+
+def _rubocop_parse(stdout):
+    """Parse rubocop's --lint --format json: the code is cop_name; the message
+    repeats the cop as a prefix, which is stripped."""
+    out = []
+    for f in json.loads(stdout or "{}").get("files", []):
+        for off in f.get("offenses", []):
+            code = off.get("cop_name") or "Lint"
+            message = off.get("message") or ""
+            if message.startswith(code + ": "):
+                message = message[len(code) + 2:]
+            out.append(((off.get("location") or {}).get("line", 0), code, message))
+    return out
+
+
+# The catalog: every entry is VERIFIED to lint one file with machine-parseable output
+# (see docs/plans/2026-10-28-setup-tiers-and-coverage-notice.md, verification record).
+# tier: basic = ruff+shellcheck, polyglot = everything; local user linters are always in tier.
+# install names the package manager setup drives (never sudo). rubocop via brew, not gem:
+# Homebrew ruby's gem bin dir is off PATH, so a gem install could never verify by outcome.
 BUILTIN = [
-    {"id": "ruff", "language": "Python", "binary": "ruff", "install": "pipx install ruff",
+    {"id": "ruff", "language": "Python", "binary": "ruff", "tier": "basic",
+     "install": {"manager": "pipx", "cmd": ["pipx", "install", "ruff"]},
      "ext": ["py", "pyi"], "shebang": r"python[0-9.]*\b",
      "command": _ruff_command, "parse": _ruff_parse},
-    {"id": "shellcheck", "language": "shell", "binary": "shellcheck",
-     "install": "brew install shellcheck", "ext": ["sh", "bash", "ksh"],
-     "shebang": r"\b(?:ba|k|da)?sh\b", "command": _shellcheck_command,
-     "parse": _shellcheck_parse},
+    {"id": "shellcheck", "language": "shell", "binary": "shellcheck", "tier": "basic",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "shellcheck"]},
+     "ext": ["sh", "bash", "ksh"], "shebang": r"\b(?:ba|k|da)?sh\b",
+     "command": _shellcheck_command, "parse": _shellcheck_parse},
+    {"id": "biome", "language": "TS/JS", "binary": "biome", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "biome"]},
+     "ext": ["ts", "tsx", "js", "jsx"], "shebang": None,
+     "command": lambda path: ["biome", "lint", "--reporter=checkstyle", str(path)],
+     "parse": _biome_parse},
+    {"id": "swiftlint", "language": "Swift", "binary": "swiftlint", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "swiftlint"]},
+     "ext": ["swift"], "shebang": None,
+     "command": lambda path: ["swiftlint", "lint", "--no-cache", str(path)],
+     "parse": _gcc_parse},
+    {"id": "rubocop", "language": "Ruby", "binary": "rubocop", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "rubocop"]},
+     "ext": ["rb"], "shebang": None,
+     # --lint = the Lint department: the pinned conservative error-cop set, as ruff is pinned.
+     "command": lambda path: ["rubocop", "--lint", "--format", "json", str(path)],
+     "parse": _rubocop_parse},
+    {"id": "actionlint", "language": "Actions", "binary": "actionlint", "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "actionlint"]},
+     "ext": [], "shebang": None,
+     # matched by path, never by yml/yaml extension: actionlint would "lint" any yaml as a
+     # broken workflow (verified on a docker-compose file)
+     "path_regex": r"\.github/workflows/[^/]+\.ya?ml$",
+     "command": lambda path: ["actionlint", "-format", ACTIONLINT_FORMAT, str(path)],
+     "parse": _actionlint_parse},
 ]
 
 
+def install_hint(linter):
+    """Display form of the install command (local linters carry a plain string; a malformed
+    entry degrades to what it holds instead of crashing a display path)."""
+    install = linter.get("install") or ""
+    if isinstance(install, str):
+        return install
+    cmd = install.get("cmd", [])
+    return cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
+
+
 def load_linters():
-    """Built-ins plus user linters from linters.local.json (same fields; command is a list
+    """Catalog plus user linters from linters.local.json (same fields; command is a list
     with "{file}" as the placeholder, output parsed as gcc-style lines)."""
     linters = [dict(item) for item in BUILTIN]
     local = _load_json(config_home() / "linters.local.json", {})
@@ -165,7 +285,8 @@ def load_linters():
         linters.append({
             "id": entry["id"], "language": entry.get("language", entry["id"]),
             "binary": entry.get("binary", template[0]), "install": entry.get("install", ""),
-            "ext": [e.lstrip(".") for e in entry.get("ext", [])], "shebang": entry.get("shebang"),
+            "tier": "local", "ext": [e.lstrip(".") for e in entry.get("ext", [])],
+            "shebang": entry.get("shebang"),
             "command": (lambda path, t=template: [str(path) if p == "{file}" else p for p in t]),
             "parse": _gcc_parse})
     return [lin for lin in linters if lin["id"] not in disabled]
@@ -185,6 +306,11 @@ def linters_for(path, linters):
     shebang = None
     hits = []
     for linter in linters:
+        path_re = linter.get("path_regex")
+        if path_re:  # path-matched entries (e.g. workflow files) ignore ext and shebang
+            if re.search(path_re, str(path)):
+                hits.append(linter)
+            continue
         if ext and ext in linter["ext"]:
             hits.append(linter)
         elif not ext and linter.get("shebang"):
@@ -514,6 +640,36 @@ def _format_findings(findings, ranges, path):
     return "\n".join(lines)
 
 
+COVERAGE_NOTICE_C3 = ('check-code: %s edits are not linted — run "check-code.py setup" once '
+                      'to choose coverage (or "setup --tier none" to silence this).')
+COVERAGE_NOTICE_C4 = ('check-code: %s is missing but your "%s" tier includes it — run '
+                      '"check-code.py setup".')
+
+
+def _coverage_notice(path, candidates, recorded, session_id):
+    """The quiet coverage notice (plan section C); first rule that applies decides.
+    Reached only when no installed linter covered the file and nothing else will print.
+    C1 no catalog entry covers the file type / C2 the recorded tier excludes it -> silent.
+    C3 setup never ran -> ONE line, once per session in TOTAL. C4 the tier includes the
+    linter but it went missing -> one line, once per session per linter, pointing at
+    setup, never at a per-tool install command."""
+    if not candidates:
+        return ""
+    in_tier = [lin for lin in candidates
+               if recorded is None or tier_covers(recorded, lin["tier"])]
+    if not in_tier:
+        return ""
+    if recorded is None:
+        if not _note_once(session_id, "coverage"):
+            return ""
+        label = ("." + path.suffix.lstrip(".")) if path.suffix else candidates[0]["language"].lower()
+        return COVERAGE_NOTICE_C3 % label
+    for lin in in_tier:
+        if _note_once(session_id, "tiermissing:" + lin["id"]):
+            return COVERAGE_NOTICE_C4 % (lin["id"], recorded)
+    return ""
+
+
 def check_edit(payload):
     """Return the feedback text for one PostToolUse payload, or '' for nothing to say."""
     tool_input = payload.get("tool_input") or {}
@@ -530,18 +686,16 @@ def check_edit(payload):
     findings = [f for f in builtin_findings(path, content, tool_name, session_id)
                 if f[1] in FILE_LEVEL_CODES or in_ranges(f[0], ranges)]
     candidates = linters_for(path, load_linters())
+    recorded = recorded_tier()
+    if recorded == "none":
+        candidates = []  # an explicit choice: no external linters run, nothing to notice
     if not candidates and not findings:
         return ""
     installed = [lin for lin in candidates if find_binary(lin["binary"])]
     if not installed:
         if findings:  # the built-in checks need no installed linter
             return _format_findings(findings, ranges, path)
-        lin = candidates[0]
-        if _note_once(session_id, "missing:" + lin["id"]):
-            return ("check-code: %s edits are not being checked -- %s is not installed (%s). "
-                    "Tell the user once; installing is their call." % (lin["language"], lin["binary"],
-                                                                        lin["install"]))
-        return ""
+        return _coverage_notice(path, candidates, recorded, session_id)
     for linter in installed:
         for line, code, message in run_linter(linter, path):
             if in_ranges(line, ranges):
@@ -573,6 +727,179 @@ def run_hook(stdin):
     return 0
 
 
+# ---------------------------------------------------------------- setup
+# The preferred route: choose a coverage tier up front and install its linters, instead of
+# discovering a missing dependency mid-edit. Only the catalog is managed here; a user's own
+# linters.local.json entries are theirs. Never sudo, never a system-package override.
+
+INSTALL_TIMEOUT = 600  # seconds per install command (a brew bottle can be large)
+
+SETUP_MENU = """\
+check-code setup — choose linter coverage
+
+  1) polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint: Python, shell, TS/JS,
+               Swift, Ruby, GitHub Actions -- recommended, and the default (Enter)
+  2) basic     ruff + shellcheck only: Python and shell
+  3) none      no external linters; built-in checks still run and coverage notices stay silent
+
+  Enter = polyglot    q) Quit
+"""
+
+SETUP_EPILOG = """\
+tiers:
+  polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint (Python, shell, TS/JS,
+            Swift, Ruby, GitHub Actions) -- the recommended default: Enter in the menu, and
+            what 'setup --yes' installs when --tier is not given
+  basic     ruff + shellcheck (Python, shell) -- opt in if you know you will not touch the
+            polyglot languages
+  none      no external linters: built-in checks still run and coverage notices stay silent
+interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
+plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
+a missing package manager prints the command to run yourself instead of failing. After each
+install the binary is re-resolved, so the report is installed / already present / FAILED, not
+the installer's exit code.
+environment:
+  CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
+                    (default ~/.claude/check-code)
+"""
+
+
+def _isatty():
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
+
+def _run_install(cmd):
+    """Run one install command: (ok, reason). THE injectable runner — tests replace it so no
+    test ever runs a real installer."""
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=INSTALL_TIMEOUT)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, str(exc)
+    lines = (proc.stdout + proc.stderr).strip().splitlines()
+    reason = lines[-1].strip() if lines else "exited %d" % proc.returncode
+    return proc.returncode == 0, reason
+
+
+def setup_plan(tier):
+    """[(linter, status, detail)] for the tier: installed / install / cannot."""
+    if tier == "none":
+        return []
+    plan = []
+    for linter in [dict(item) for item in BUILTIN]:
+        if not tier_covers(tier, linter["tier"]):
+            continue
+        found = find_binary(linter["binary"])
+        if found:
+            plan.append((linter, "installed", found))
+        elif find_binary(linter["install"]["manager"]):
+            plan.append((linter, "install", install_hint(linter)))
+        else:
+            plan.append((linter, "cannot", "%s is not installed here -- run '%s' yourself"
+                         % (linter["install"]["manager"], install_hint(linter))))
+    return plan
+
+
+def _print_plan(tier, plan):
+    print("check-code setup -- tier: %s" % tier)
+    if tier == "none":
+        print("  no external linters will be installed or run; built-in checks stay on and the "
+              "missing-linter notice stays silent")
+        return
+    for linter, status, detail in plan:
+        print("  %-11s %s: %s" % (linter["id"],
+                                  {"installed": "already installed",
+                                   "install": "will install",
+                                   "cannot": "cannot install here"}[status], detail))
+
+
+def record_tier(tier):
+    """Write (or overwrite) the recorded tier; setup re-runs may change it and other config
+    keys are preserved."""
+    path = config_home() / CONFIG_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    config = _load_json(path, {})
+    config["tier"] = tier
+    path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
+
+
+def _confirm(count, read_line=None):
+    read_line = read_line or input
+    try:
+        answer = read_line("install %d linter(s)? [y/N] " % count)
+    except EOFError:
+        return False
+    return answer.strip().lower() in ("y", "yes")
+
+
+def _prompt_tier(read_line=None):
+    """Interactive tier choice: numbers = actions, letters = navigation, Enter = the shown
+    default (polyglot). Returns the tier, or None when the user quits."""
+    read_line = read_line or input
+    print(SETUP_MENU)
+    choices = {"1": "polyglot", "2": "basic", "3": "none", "": DEFAULT_TIER}
+    while True:
+        try:
+            answer = read_line("choose 1, 2, 3 [Enter = polyglot, q = quit]: ").strip().lower()
+        except EOFError:
+            return None
+        if answer in ("q", "quit"):
+            return None
+        if answer in choices:
+            return choices[answer]
+        print("not a choice: 1, 2, 3, Enter, or q")
+
+
+def cmd_setup(args):
+    if args.dry_run:
+        tier = args.tier or DEFAULT_TIER   # a probe looks at the default's plan; changes nothing
+    elif args.tier is None:
+        if _isatty() and not args.yes:
+            tier = _prompt_tier()      # the menu: Enter = polyglot, the opt-out default
+            if tier is None:
+                print("nothing changed")
+                return 0
+        elif args.yes:
+            tier = DEFAULT_TIER        # confirmed by --yes: the recommended default
+        else:
+            print("setup: the menu needs a TTY; pass --tier basic|polyglot|none with --yes "
+                  "for scripts", file=sys.stderr)
+            return 2
+    else:
+        tier = args.tier
+    plan = setup_plan(tier)
+    _print_plan(tier, plan)
+    if args.dry_run:
+        print("dry run: nothing installed, nothing recorded")
+        return 0
+    if not args.yes:
+        if not _isatty():
+            print("setup: --yes is required when stdin is not a TTY (or use --dry-run)",
+                  file=sys.stderr)
+            return 2
+        pending = [entry for entry in plan if entry[1] == "install"]
+        if pending and not _confirm(len(pending)):
+            print("aborted: nothing installed, nothing recorded")
+            return 0
+    for linter, status, reason in plan:
+        if status != "install":
+            continue
+        _run_install(linter["install"]["cmd"])
+        found = find_binary(linter["binary"])  # verify by outcome, not by exit code
+        if found:
+            print("  %-11s installed: %s" % (linter["id"], found))
+        else:
+            print("  %-11s FAILED: %s" % (linter["id"], reason or
+                                          "the installer reported success but the binary is still "
+                                          "not on PATH"))
+    record_tier(tier)
+    print("tier recorded: %s (%s)" % (tier, config_home() / CONFIG_FILE))
+    print('coverage applies from the next edit; "check-code.py doctor" shows what is installed')
+    return 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def cmd_check(args):
@@ -588,7 +915,7 @@ def cmd_check(args):
         return 0
     for linter in linters:
         if not find_binary(linter["binary"]):
-            print("%s: not installed (%s)" % (linter["id"], linter["install"]))
+            print("%s: not installed (%s)" % (linter["id"], install_hint(linter)))
             continue
         for line, code, message in sorted(run_linter(linter, path)):
             print("%s:%d %s %s" % (path.name, line, code, message))
@@ -598,12 +925,27 @@ def cmd_check(args):
 
 def cmd_doctor(_args):
     linters = load_linters()
+    recorded = recorded_tier()
+    raw = _load_json(config_home() / CONFIG_FILE, {}).get("tier")
+    if recorded is None:
+        print("tier: setup never run" + (" (config.json holds %r, which is not a tier)" % raw
+                                         if raw is not None else ""))
+    else:
+        print("tier: %s" % recorded)
     missing = 0
     for linter in linters:
         found = find_binary(linter["binary"])
-        missing += 0 if found else 1
-        print("%-11s %-8s %s" % (linter["id"], linter["language"],
-                                 found or "MISSING (%s)" % linter["install"]))
+        if found:
+            missing += 0
+            print("%-11s %-8s %s" % (linter["id"], linter["language"], found))
+            continue
+        missing += 1
+        if recorded is not None and linter["tier"] != "local" \
+                and not tier_covers(recorded, linter["tier"]):
+            note = "not in your tier (%s)" % recorded       # excluded on purpose: not MISSING
+        else:
+            note = "MISSING (%s)" % install_hint(linter)
+        print("%-11s %-8s %s" % (linter["id"], linter["language"], note))
     local = config_home() / "linters.local.json"
     print("local config: %s" % (local if local.exists() else "none (%s)" % local))
     print("built-in checks (always on): STDERR-PIPE (python), NO-HELP (new script files), "
@@ -624,13 +966,21 @@ def main(argv=None):
     p = sub.add_parser("check", help="lint a whole FILE the way the hook would")
     p.add_argument("file")
     sub.add_parser("doctor", help="show which linters are installed")
+    s = sub.add_parser("setup", help="install a tier's linters and record the choice",
+                       description="Install the linters of a coverage tier and record it in "
+                                   "$CHECK_CODE_HOME/config.json. Never uses sudo.",
+                       epilog=SETUP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    s.add_argument("--tier", choices=TIERS, help="basic | polyglot | none (default: polyglot)")
+    s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
+    s.add_argument("--dry-run", action="store_true",
+                   help="print the plan and change nothing")
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help(sys.stderr)
         return 2
     if args.cmd == "hook":
         return run_hook(sys.stdin)
-    return {"check": cmd_check, "doctor": cmd_doctor}[args.cmd](args)
+    return {"check": cmd_check, "doctor": cmd_doctor, "setup": cmd_setup}[args.cmd](args)
 
 
 if __name__ == "__main__":

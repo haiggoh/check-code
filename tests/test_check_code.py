@@ -1,4 +1,5 @@
 """Tests for check-code. Real ruff/shellcheck are used when installed; stubs otherwise."""
+import argparse
 import importlib.util
 import io
 import json
@@ -148,14 +149,16 @@ def test_cap_and_more_line(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- missing linter / fail-open
 
-def test_missing_linter_noted_once_per_session(tmp_path, monkeypatch):
+def test_missing_linter_is_one_quiet_notice_per_session_total(tmp_path, monkeypatch):
+    # the per-linter "not installed (install cmd)" line is REPLACED by the coverage notice
     monkeypatch.setattr(cc, "find_binary", lambda name: None)
     f = tmp_path / "a.py"
     f.write_text("x = 1\n")
     first = hook(edit_payload(f, "x = 1", session="m"))[1]
-    assert "not installed" in first and "pipx install ruff" in first
+    assert "not linted" in first and '"check-code.py setup"' in first
+    assert "pipx install ruff" not in first and "not installed" not in first
     assert hook(edit_payload(f, "x = 1", session="m"))[1] == ""
-    assert "not installed" in hook(edit_payload(f, "x = 1", session="other"))[1]
+    assert "not linted" in hook(edit_payload(f, "x = 1", session="other"))[1]
 
 
 @pytest.mark.parametrize("payload", [
@@ -481,6 +484,43 @@ def test_doctor_lists_builtin_checks():
     assert "builtin" in r.stdout
 
 
+def test_doctor_shows_the_recorded_tier(tmp_path, monkeypatch, capsys):
+    _setup_tier("polyglot")
+    rc = cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert rc == 0 and out.splitlines()[0] == "tier: polyglot"
+
+
+def test_doctor_reports_setup_never_run(capsys):
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    assert not home.exists() or not (home / "config.json").exists()
+    rc = cc.cmd_doctor(None)
+    assert rc == 0 and capsys.readouterr().out.splitlines()[0] == "tier: setup never run"
+
+
+def test_doctor_reports_an_invalid_recorded_tier_loudly(tmp_path, monkeypatch, capsys):
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.json").write_text('{"tier": "zzz"}', encoding="utf-8")
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert "setup never run" in out and "zzz" in out      # loud, not a silent default
+
+
+def test_doctor_marks_linters_outside_the_recorded_tier(tmp_path, monkeypatch, capsys):
+    _setup_tier("basic")
+    monkeypatch.setattr(cc, "find_binary", lambda n: "/bin/" + n if n in ("ruff", "biome") else None)
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    # installed: shows the path, even out of tier (an installed linter still runs)
+    assert "ruff        Python   /bin/ruff" in out
+    assert "biome       TS/JS    /bin/biome" in out
+    # missing AND out of tier: excluded on purpose, so not a MISSING
+    assert "not in your tier (basic)" in out
+    # missing but IN tier: the drift case (C4), still a MISSING with its install hint
+    assert "shellcheck" in out and "MISSING (brew install shellcheck)" in out
+
+
 # ---------------------------------------------------------------- built-in checks: hardcoded paths
 
 def test_hardcoded_cache_version_path_is_flagged(tmp_path):
@@ -674,3 +714,463 @@ def test_findings_header_exact_string(tmp_path):
         "🩻 check-code: 1 issue(s) in the file you just wrote, do-thing.sh (as of THIS edit -- "
         "a sibling edit in the same batch may already fix them) -- fix them now, or say why a "
         "finding is intentional:")
+
+
+# ---------------------------------------------------------------- catalog: the verified polyglot linters
+
+FIXTURES = ROOT / "tests" / "fixtures"
+
+
+def test_biome_parser_reads_real_fixture():
+    out = cc._biome_parse((FIXTURES / "biome-checkstyle.xml").read_text(encoding="utf-8"))
+    assert (1, "noExplicitAny", "Unexpected any. Specify a different type.") in out
+    assert (2, "noDebugger", "This is an unexpected use of the debugger statement.") in out
+    assert {code for _, code, _ in out} >= {"noUnusedVariables", "useConst"}
+
+
+def test_biome_parser_empty_stdout_is_no_findings():
+    assert cc._biome_parse("") == []
+
+
+def test_swiftlint_parser_reads_real_fixture():
+    out = cc._gcc_parse((FIXTURES / "swiftlint.txt").read_text(encoding="utf-8"))
+    assert (6, "colon", "Colon Spacing Violation: Colons should be next to the identifier "
+             "when specifying a type and next to the key in dictionary literals") in out
+    assert (5, "identifier_name", "Identifier Name Violation: Function name 'Fetchdata()' "
+             "should start with a lowercase character") in out
+
+
+def test_actionlint_parser_reads_real_fixture():
+    assert cc._actionlint_parse(
+        (FIXTURES / "actionlint.txt").read_text(encoding="utf-8")) == [
+        (7, "shell-name", 'shell name "fish" is invalid. available names are '
+                           '"bash", "pwsh", "python", "sh"')]
+
+
+def test_rubocop_parser_reads_real_fixture():
+    assert cc._rubocop_parse(
+        (FIXTURES / "rubocop.json").read_text(encoding="utf-8")) == [
+        (2, "Lint/UselessAssignment", "Useless assignment to variable - `x`.")]
+    assert cc._rubocop_parse("") == []
+
+
+def test_catalog_dispatch_new_languages(tmp_path):
+    linters = cc.load_linters()
+    ids = lambda p: [lin["id"] for lin in cc.linters_for(p, linters)]  # noqa: E731
+    assert ids(tmp_path / "a.ts") == ["biome"]
+    assert ids(tmp_path / "a.tsx") == ["biome"]
+    assert ids(tmp_path / "a.js") == ["biome"]
+    assert ids(tmp_path / "a.jsx") == ["biome"]
+    assert ids(tmp_path / "a.swift") == ["swiftlint"]
+    assert ids(tmp_path / "a.rb") == ["rubocop"]
+    assert ids(tmp_path / "a.json") == []       # no catalog entry claims json (notice rule C1)
+    assert ids(tmp_path / "compose.yml") == []  # non-workflow yaml never reaches actionlint
+
+
+def test_actionlint_matches_by_workflow_path(tmp_path):
+    linters = cc.load_linters()
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on: push\n")
+    assert [lin["id"] for lin in cc.linters_for(wf, linters)] == ["actionlint"]
+    other = tmp_path / ".github" / "workflows" / "release.yaml"
+    other.write_text("on: push\n")
+    assert [lin["id"] for lin in cc.linters_for(other, linters)] == ["actionlint"]
+
+
+def test_version_is_the_same_everywhere():
+    manifest = json.loads((ROOT / ".claude-plugin" / "plugin.json").read_text(encoding="utf-8"))
+    assert cc.VERSION == manifest["version"]
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert "## [%s]" % cc.VERSION in changelog
+
+
+def test_catalog_tiers_and_install_data():
+    cat = {lin["id"]: lin for lin in cc.load_linters()}
+    assert cat["ruff"]["tier"] == "basic" and cat["shellcheck"]["tier"] == "basic"
+    for ident in ("biome", "swiftlint", "rubocop", "actionlint"):
+        assert cat[ident]["tier"] == "polyglot"
+        assert cat[ident]["install"]["manager"] == "brew"
+    assert cat["ruff"]["install"] == {"manager": "pipx", "cmd": ["pipx", "install", "ruff"]}
+    assert cc.install_hint(cat["biome"]) == "brew install biome"
+    assert cc.install_hint({"id": "x", "install": "npm install -g x"}) == "npm install -g x"
+
+
+def test_install_hint_tolerates_malformed_local_entries():
+    # a local linters.local.json entry may carry install as a dict with a plain-string cmd
+    assert cc.install_hint({"id": "x", "install": {"cmd": "npm install x"}}) == "npm install x"
+    assert cc.install_hint({"id": "x"}) == ""
+
+
+def test_doctor_shows_install_hint_for_missing_linters(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    cc.cmd_doctor(None)
+    out = capsys.readouterr().out
+    assert "MISSING (pipx install ruff)" in out
+    assert "MISSING (brew install biome)" in out
+    assert "{" not in out   # no raw install dict may leak into the display
+
+
+def _stub_bin(tmp_path, monkeypatch, name, fixture):
+    stub_dir = tmp_path / ("stubs-" + name)
+    stub_dir.mkdir(exist_ok=True)
+    stub = stub_dir / name
+    # /bin/cat: the stub must not depend on PATH, which this helper re-points at the stub dir
+    stub.write_text('#!/bin/sh\n/bin/cat "%s"\n' % fixture)
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_dir))
+    monkeypatch.setattr(cc, "EXTRA_PATH", [])
+
+
+def test_stubbed_linters_run_end_to_end(tmp_path, monkeypatch):
+    # biome: real captured XML via a stub binary, filtered to the touched line
+    f = tmp_path / "a.ts"
+    f.write_text("const a: any = 1;\ndebugger;\nlet x =  1;\n")
+    _stub_bin(tmp_path, monkeypatch, "biome", FIXTURES / "biome-checkstyle.xml")
+    _, out = hook(edit_payload(f, "debugger;"))
+    assert "noDebugger" in out and "L2" in out
+
+    # swiftlint: gcc-style parse, rule from the trailing parens
+    s = tmp_path / "a.swift"
+    s.write_text("import Foundation\n\nclass MyVC {\n    var dsfsd = 0\n"
+                 "    func Fetchdata() -> Void {\n        let x:Int = 1\n        print(x)\n"
+                 "    }\n}\n")
+    _stub_bin(tmp_path, monkeypatch, "swiftlint", FIXTURES / "swiftlint.txt")
+    _, out = hook(edit_payload(s, "let x:Int = 1"))
+    assert "L6 colon" in out and "identifier_name" in out
+
+    # rubocop: json parse, cop name as the code, cop prefix stripped from the message
+    r = tmp_path / "a.rb"
+    r.write_text("def f\n  x = 1\nend\ny = 2\nputs y\n")
+    _stub_bin(tmp_path, monkeypatch, "rubocop", FIXTURES / "rubocop.json")
+    _, out = hook(edit_payload(r, "x = 1"))
+    assert "L2 Lint/UselessAssignment" in out and "Useless assignment" in out
+
+
+def test_stubbed_actionlint_gets_the_format_template(tmp_path, monkeypatch):
+    stub_dir = tmp_path / "stubs-actionlint"
+    stub_dir.mkdir()
+    calls = tmp_path / "argv.txt"
+    stub = stub_dir / "actionlint"
+    stub.write_text('#!/bin/sh\nprintf "%%s\\n" "$@" > "%s"\n/bin/cat "%s"\n'
+                    % (calls, FIXTURES / "actionlint.txt"))
+    stub.chmod(0o755)
+    monkeypatch.setenv("PATH", str(stub_dir))
+    monkeypatch.setattr(cc, "EXTRA_PATH", [])
+    wf = tmp_path / ".github" / "workflows" / "ci.yml"
+    wf.parent.mkdir(parents=True)
+    wf.write_text("on: push\njobs:\n  b:\n    runs-on: l\n    steps:\n"
+                  "      - run: x\n        shell: fish\n")
+    _, out = hook(edit_payload(wf, "shell: fish"))
+    assert "L7 shell-name" in out
+    argv = calls.read_text()
+    assert "-format" in argv and cc.ACTIONLINT_FORMAT in argv and str(wf) in argv
+
+
+# ---------------------------------------------------------------- the quiet coverage notice
+
+def _setup_tier(tier=None):
+    """Record a setup tier in the isolated CHECK_CODE_HOME (None = setup never ran)."""
+    home = Path(os.environ["CHECK_CODE_HOME"])
+    home.mkdir(parents=True, exist_ok=True)
+    if tier is not None:
+        (home / "config.json").write_text(json.dumps({"tier": tier}))
+
+
+def test_c1_uncovered_file_types_are_always_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()  # no setup ever recorded
+    for name, body in (("notes.md", "hello\n"), ("data.json", "{}\n"), ("list.txt", "x\n")):
+        f = tmp_path / name
+        f.write_text(body)
+        assert hook(edit_payload(f, body.strip(), session="c1"))[1] == ""
+
+
+def test_c3_notice_once_per_session_in_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    first = hook(edit_payload(f, "x = 1", session="n"))[1]
+    assert ".py edits are not linted" in first and '"check-code.py setup"' in first
+    assert '"setup --tier none"' in first
+    assert not first.startswith("🩻")   # 0.3.1: the notice stays unbranded (credit-moments rule)
+    # once per session in TOTAL, not per language: a different language stays silent
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    assert hook(edit_payload(t, "const a = 1;", session="n"))[1] == ""
+    assert hook(edit_payload(f, "x = 1", session="n"))[1] == ""      # same file too
+    assert ".py edits" in hook(edit_payload(f, "x = 1", session="n2"))[1]  # new session: fires
+
+
+def test_c3_label_for_extensionless_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    s = tmp_path / "deploy"
+    s.write_text("#!/bin/bash\necho hi\n")
+    out = hook(edit_payload(s, "echo hi", session="sb"))[1]
+    assert "shell edits are not linted" in out
+
+
+def test_c2_tier_excluding_language_is_silent(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("basic")
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    assert hook(edit_payload(t, "const a = 1;", session="t"))[1] == ""  # C2: user chose basic
+
+
+def test_c4_missing_in_tier_linter_points_at_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("basic")
+    p = tmp_path / "a.py"
+    p.write_text("x = 1\n")
+    first = hook(edit_payload(p, "x = 1", session="t"))[1]
+    assert "ruff" in first and "setup" in first and "pipx install" not in first
+    assert hook(edit_payload(p, "x = 1", session="t"))[1] == ""        # once per session per linter
+
+
+def test_c4_is_per_linter_not_per_session_total(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("polyglot")
+    p = tmp_path / "a.py"
+    p.write_text("x = 1\n")
+    first = hook(edit_payload(p, "x = 1", session="u"))[1]
+    t = tmp_path / "b.ts"
+    t.write_text("const a = 1;\n")
+    second = hook(edit_payload(t, "const a = 1;", session="u"))[1]
+    # C4 names the linter and the tier, not the per-tool install command; per linter, not once total
+    assert "ruff" in first and "tier" in first and "pipx install" not in first
+    assert "biome" in second and "brew install" not in second
+
+
+def test_c2_tier_none_silences_and_stops_external_linters(tmp_path, monkeypatch):
+    _setup_tier("none")
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/bin/" + name)
+    monkeypatch.setattr(cc, "run_linter", lambda lin, p: [(1, "F401", "unused import")])
+    f = tmp_path / "a.py"
+    f.write_text("import os\n")
+    assert hook(edit_payload(f, "import os", session="v"))[1] == ""    # runs nothing, says nothing
+
+
+def test_clean_covered_edit_prints_nothing(tmp_path, monkeypatch):
+    def fake_find(name):
+        return "/bin/ruff" if name == "ruff" else None
+    monkeypatch.setattr(cc, "find_binary", fake_find)
+    monkeypatch.setattr(cc, "run_linter", lambda lin, p: [])   # covered, and the lint is clean
+    _setup_tier()
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    assert hook(edit_payload(f, "x = 1", session="w"))[1] == ""       # covered + clean: no notice
+
+
+def test_findings_print_without_the_notice(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier()
+    f = tmp_path / "probe.py"
+    f.write_text("import subprocess\nproc = subprocess.Popen(['x'], stderr=subprocess.PIPE)\n"
+                 "proc.wait()\n")
+    _, out = hook(edit_payload(f, "proc = subprocess.Popen(['x'], stderr=subprocess.PIPE)",
+                               session="z"))
+    assert "STDERR-PIPE" in out and "not linted" not in out
+
+
+def test_invalid_recorded_tier_reads_as_never_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    _setup_tier("banana")
+    f = tmp_path / "a.py"
+    f.write_text("x = 1\n")
+    out = hook(edit_payload(f, "x = 1", session="q"))[1]
+    assert "not linted" in out    # C3: an invalid tier is not a choice the user made
+
+
+# ---------------------------------------------------------------- setup: tiers, installs, config
+
+def _stub_setup(monkeypatch, present=(), managers=("brew", "pipx"), runner=None):
+    """Stub find_binary + the injectable install runner; returns the call log."""
+    def fake_find(name):
+        return "/bin/" + name if (name in present or name in managers) else None
+    monkeypatch.setattr(cc, "find_binary", fake_find)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", runner or fake_run)
+    return calls
+
+
+def _config():
+    return json.loads((Path(os.environ["CHECK_CODE_HOME"]) / "config.json").read_text())
+
+
+def setup_args(tier, yes=True, dry_run=False):
+    return argparse.Namespace(tier=tier, yes=yes, dry_run=dry_run)
+
+
+def test_setup_dry_run_changes_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    rc = cc.cmd_setup(setup_args("polyglot", dry_run=True))
+    out = capsys.readouterr().out
+    assert rc == 0 and "dry run" in out and "brew install biome" in out
+    assert calls == []                                                  # runner never called
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_yes_installs_and_records_the_tier(monkeypatch, capsys):
+    installed = set()                      # shared with find_binary: an install makes it appear
+    monkeypatch.setattr(cc, "find_binary",
+                        lambda name: "/bin/" + name
+                        if (name in installed or name in ("brew", "pipx")) else None)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        installed.add(cmd[-1])
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", fake_run)
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"]]
+    assert "installed: /bin/ruff" in out and "installed: /bin/shellcheck" in out
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_reports_a_planted_failed_install(monkeypatch, capsys):
+    # planted positive: the runner "succeeds" but leaves no binary -> FAILED, tier still recorded
+    _stub_setup(monkeypatch, runner=lambda cmd: (True, "Everything up-to-date"))
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "FAILED" in out and "ruff" in out
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_missing_manager_prints_the_command_and_continues(monkeypatch, capsys):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)          # nothing, no manager
+    calls = []
+    monkeypatch.setattr(cc, "_run_install",
+                        lambda cmd: (calls.append(list(cmd)), (True, "ok"))[1])
+    rc = cc.cmd_setup(setup_args("basic"))
+    out = capsys.readouterr().out
+    assert rc == 0 and "cannot install here" in out and calls == []
+    assert "pipx install ruff" in out                                   # the command to run yourself
+    assert _config() == {"tier": "basic"}
+
+
+def test_setup_records_none_and_installs_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    rc = cc.cmd_setup(setup_args("none"))
+    out = capsys.readouterr().out
+    assert rc == 0 and calls == [] and "silent" in out
+    assert _config() == {"tier": "none"}
+
+
+def test_setup_rerun_changes_the_tier(monkeypatch):
+    _stub_setup(monkeypatch, present=("ruff", "shellcheck", "biome", "swiftlint", "rubocop",
+                                      "actionlint"))
+    cc.cmd_setup(setup_args("basic"))
+    cc.cmd_setup(setup_args("none"))
+    assert _config() == {"tier": "none"}
+
+
+def test_setup_declined_confirmation_changes_nothing(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: True)
+    monkeypatch.setattr(cc, "_confirm", lambda count: False)
+    rc = cc.cmd_setup(setup_args("basic", yes=False))
+    assert rc == 0 and "aborted" in capsys.readouterr().out and calls == []
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_requires_yes_when_not_a_tty(monkeypatch, capsys):
+    _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    rc = cc.cmd_setup(setup_args("basic", yes=False))
+    assert rc == 2 and "yes" in capsys.readouterr().err.lower()
+
+
+def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, capsys):
+    # the owner's default is opt-out: `setup --yes` with no --tier = confirmed polyglot
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    installed = set()
+    monkeypatch.setattr(cc, "find_binary",
+                        lambda n: "/bin/" + n
+                        if (n in installed or n in ("brew", "pipx")) else None)
+    calls = []
+
+    def fake_run(cmd):
+        calls.append(list(cmd))
+        installed.add(cmd[-1])
+        return True, "ok"
+    monkeypatch.setattr(cc, "_run_install", fake_run)
+    rc = cc.cmd_setup(setup_args(None))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"],
+                     ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
+                     ["brew", "install", "rubocop"], ["brew", "install", "actionlint"]]
+    assert _config() == {"tier": "polyglot"}
+    assert "installed: /bin/actionlint" in out
+
+
+def test_setup_bare_non_tty_run_still_refuses(monkeypatch, capsys):
+    # no --tier, no --yes, no TTY: nothing is confirmed, so nothing happens
+    _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "_isatty", lambda: False)
+    rc = cc.cmd_setup(setup_args(None, yes=False))
+    assert rc == 2 and not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_menu_enter_is_the_shown_default_and_q_quits(capsys):
+    lines = iter(["", "2", "q", "3"])
+    read = lambda prompt="": next(lines)   # noqa: E731
+    assert cc._prompt_tier(read) == "polyglot"   # Enter = the shown default (owner: opt-out)
+    assert cc._prompt_tier(read) == "basic"      # 2 = opt-in
+    assert cc._prompt_tier(read) is None
+    assert cc._prompt_tier(read) == "none"
+
+
+def test_setup_menu_reprompts_on_garbage(capsys):
+    lines = iter(["banana", "1"])
+    assert cc._prompt_tier(lambda prompt="": next(lines)) == "polyglot"
+    assert "1, 2, 3" in capsys.readouterr().out
+
+
+def test_setup_menu_shows_polyglot_first_as_the_default():
+    assert "Enter = polyglot" in cc.SETUP_MENU
+    assert cc.SETUP_MENU.index("polyglot") < cc.SETUP_MENU.index("basic")
+
+
+# ---------------------------------------------------------------- setup CLI (real subprocess)
+
+def test_setup_help_documents_tiers_and_env():
+    r = cli("setup", "--help")
+    assert r.returncode == 0
+    for word in ("basic", "polyglot", "none", "CHECK_CODE_HOME", "--dry-run", "--yes", "--tier"):
+        assert word in r.stdout
+    assert not Path(os.environ["CHECK_CODE_HOME"]).exists()   # a probe must not write
+
+
+def test_setup_usage_errors_exit_2():
+    assert cli("setup", "--tier", "banana").returncode == 2
+    assert cli("setup", "--bogus").returncode == 2
+
+
+def test_setup_dry_run_via_cli_writes_nothing():
+    r = cli("setup", "--tier", "polyglot", "--dry-run")
+    assert r.returncode == 0 and "dry run" in r.stdout
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_dry_run_without_a_tier_shows_the_default_plan():
+    # a probe with no --tier and no TTY still sees a plan (the polyglot default) and writes nothing
+    r = cli("setup", "--dry-run")
+    assert r.returncode == 0 and "tier: polyglot" in r.stdout and "dry run" in r.stdout
+    assert not (Path(os.environ["CHECK_CODE_HOME"]) / "config.json").exists()
+
+
+def test_setup_without_tty_requires_a_tier():
+    r = subprocess.run([sys.executable, str(SCRIPT), "setup"], capture_output=True, text=True,
+                       env=dict(os.environ), input="")
+    assert r.returncode == 2 and "tier" in r.stderr.lower()

@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<checkstyle version="4.3">
+  <file name="bad.ts">
+    <error line="1" column="10" severity="warning" message="Unexpected any. Specify a different type." source="lint/suspicious/noExplicitAny" />
+    <error line="1" column="7" severity="warning" message="This variable a is unused." source="lint/correctness/noUnusedVariables" />
+    <error line="3" column="1" severity="warning" message="This let declares a variable that is only assigned once." source="lint/style/useConst" />
+    <error line="3" column="5" severity="warning" message="This variable x is unused." source="lint/correctness/noUnusedVariables" />
+    <error line="2" column="1" severity="error" message="This is an unexpected use of the debugger statement." source="lint/suspicious/noDebugger" />
+  </file>
+</checkstyle>
+

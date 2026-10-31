@@ -1,0 +1,1 @@
+.github/workflows/ci.yml:7:16: shell name "fish" is invalid. available names are "bash", "pwsh", "python", "sh" [shell-name]
