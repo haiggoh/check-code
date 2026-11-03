@@ -1176,6 +1176,18 @@ def test_setup_menu_shows_polyglot_first_as_the_default():
     assert cc.SETUP_MENU.index("polyglot") < cc.SETUP_MENU.index("basic")
 
 
+def test_setup_menu_opens_with_the_branded_title_and_subtitle():
+    """csl-style header (user spec 2026-11-03): the About pair + proper name on the title
+    line, a styled subtitle, the '=' rule — all before the menu's own caption."""
+    block = (
+        "🩻🔬 Check Code\n"
+        "   Lints the lines Claude just edited\n"
+        + "=" * 72 + "\n"
+    )
+    assert block in cc.SETUP_MENU
+    assert cc.SETUP_MENU.index("🩻🔬 Check Code") < cc.SETUP_MENU.index("check-code setup")
+
+
 # ---------------------------------------------------------------- setup CLI (real subprocess)
 
 def test_setup_help_documents_tiers_and_env():

@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.4.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.3"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -749,6 +749,10 @@ def run_hook(stdin):
 INSTALL_TIMEOUT = 600  # seconds per install command (a brew bottle can be large)
 
 SETUP_MENU = """\
+🩻🔬 Check Code
+   Lints the lines Claude just edited
+========================================================================
+
 check-code setup — choose linter coverage
 
   1) polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint: Python, shell, TS/JS,

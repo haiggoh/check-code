@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.3] — 2026-11-03
+
+### Added — 🩻🔬 branded setup menu (menu-restyle batch, user spec 2026-11-03)
+
+- The interactive setup menu opens with a csl-style header — 🩻🔬 Check Code /
+  subtitle / `=` rule — before its caption, matching the csl picker and get-haiggoh-menu.
+  Pinned by `tests/test_check_code.py` (exact block + ordering), mutation-checked,
+  live-fired through `setup` under a pty.
+
 ## [0.4.2] — 2026-11-03
 
 ### Fixed — HARDCODED-PATH no longer fires on plan/doc prose
