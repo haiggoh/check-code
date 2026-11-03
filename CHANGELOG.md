@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.4.2] — 2026-11-03
+
+### Fixed — HARDCODED-PATH no longer fires on plan/doc prose
+
+- The portability rule is scoped to code: `.md`/`.txt`/`.rst` files outside `skills/` are
+  exempt (plan/docs prose legitimately names this machine's local state — measured
+  2026-11-03, the hook flagged a `~/.claude/plans/*.md` line; waypoint
+  check-code-hardcoded-path). `skills/*.md` stays checked — it is published content.
+  New `_portability_checked()` gate; changelog/fixture exemptions unchanged.
+- Tests: plan/doc `.md` in a git repo exempt (non-vacuous: the fixture line carries no
+  fixture marker), `skills/*/SKILL.md` still flagged, git-repo scope test moved to a `.py`
+  file. Mutation-checked (exemption disabled -> the new test red). Suite: 118 passed.
+
 ## [0.4.1] — 2026-10-31
 
 ### Changed

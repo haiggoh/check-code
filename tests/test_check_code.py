@@ -573,13 +573,47 @@ def test_hardcoded_path_on_untouched_line_stays_quiet(tmp_path):
 def test_hardcoded_path_scope_is_git_repos_only(tmp_path):
     outside = tmp_path.parent / (tmp_path.name + "-outside")  # a sibling dir: no .git above it
     outside.mkdir(exist_ok=True)
-    f = outside / "notes.md"
-    line = "see /Users/bra0002h/.claude/x"
-    f.write_text("x\n" + line + "\n")
+    f = outside / "notes.py"
+    # split so this test file's own source line carries no full path (the hook would flag it)
+    line = 'p = "/Users/' + "bra0002h" + '/.claude/x"'
+    f.write_text("x = 1\n" + line + "\n")
     assert hook(edit_payload(f, line))[1] == ""  # not a git repo: out of scope
     subprocess.run(["git", "init", "-q", str(outside)], check=True, capture_output=True)
     _, out = hook(edit_payload(f, line))
     assert "HARDCODED-PATH" in out  # the same line, now inside a repo
+
+
+def test_hardcoded_path_in_plan_or_doc_md_is_exempt(tmp_path):
+    """waypoint check-code-hardcoded-path: plans and docs describe THIS machine's local state
+    (a ~/.claude/plans entry naming a worktree path is correct there), so the portability rule
+    is for code/published files, not prose. Measured 2026-11-03: the hook flagged L33 of a
+    plans/*.md file."""
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    f = plans / "2026-11-03-thing.md"
+    # split so the test source carries no full path AND the content line has no fixture
+    # marker — otherwise the exemption under test would be vacuous
+    line = "work in " + "~/ClaudeWorkspace/" + ".wt/rtc-110 off main a79cf58"
+    f.write_text("# plan\n" + line + "\n")
+    assert hook(edit_payload(f, line))[1] == ""  # .md in a git repo: exempt
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    f2 = docs / "notes.md"
+    f2.write_text("x\n" + line + "\n")
+    assert hook(edit_payload(f2, line))[1] == ""
+
+
+def test_hardcoded_path_in_skill_md_is_still_flagged(tmp_path):
+    """skills/*.md is PUBLISHED plugin content — the portability rule applies there (the repo's
+    own test_skills.sh greps skills/ for machine paths independently). The docs exemption must
+    not swallow it."""
+    s = tmp_path / "skills" / "demo"
+    s.mkdir(parents=True)
+    f = s / "SKILL.md"
+    line = "edit " + "~/ClaudeWorkspace/" + "free-agents/bin/x.py"
+    f.write_text("---\nname: demo\ndescription: d\n---\n" + line + "\n")
+    _, out = hook(edit_payload(f, line))
+    assert "HARDCODED-PATH" in out
 
 
 # ---------------------------------------------------------------- built-in checks: skill budget

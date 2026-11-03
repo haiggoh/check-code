@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.4.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -63,7 +63,8 @@ built-in checks (always on, no linter needed):
   NO-HELP      a Write of a new script file with no argument parsing / --help handling
   HARDCODED-PATH  a literal /Users/<name>/ home, ClaudeWorkspace/<name> checkout, or
                plugin-cache VERSION path on a touched line — use ~/…, $HOME/… or an env
-               override instead ($TMP-built test-fixture lines and CHANGELOGs are exempt)
+               override instead ($TMP-built test-fixture lines, CHANGELOGs and plan/doc
+               prose are exempt; skills/*.md still checked — it ships)
   SKILL-BUDGET a SKILL.md whose body after frontmatter exceeds 1500 words
                (CHECK_CODE_SKILL_BUDGET_WORDS overrides; once per file per session)
   MENU-NAV     a menu row giving NAVIGATION a number ("5) Exit"): house grammar is
@@ -562,6 +563,19 @@ def _hardcoded_path_lines(content):
     return out
 
 
+DOC_SUFFIXES = {".md", ".txt", ".rst"}
+
+
+def _portability_checked(path, shebang):
+    """HARDCODED-PATH is a CODE rule. Plan/doc prose may legitimately name THIS machine's local
+    state (a ~/.claude/plans entry citing a worktree path is correct there) — measured
+    2026-11-03: the hook flagged a plans/*.md line (waypoint check-code-hardcoded-path).
+    Published skill docs stay checked: skills/*.md ships to every reader."""
+    if "skills" in path.parts:
+        return True
+    return bool(shebang) or path.suffix.lower() not in DOC_SUFFIXES
+
+
 def _menu_nav_lines(content):
     return [i for i, line in enumerate(content.splitlines(), 1) if MENU_NAV.search(line)]
 
@@ -577,7 +591,7 @@ def builtin_findings(path, content, tool_name, session_id):
             and not any(signal in content for signal in HELP_SIGNALS)
             and _note_once(session_id, "nohelp:" + str(path))):
         out.append((1, "NO-HELP", NO_HELP_MESSAGE % path.name))
-    if "changelog" not in path.name.lower() and _in_git_repo(path):
+    if "changelog" not in path.name.lower() and _in_git_repo(path) and _portability_checked(path, shebang):
         for line in _hardcoded_path_lines(content):
             out.append((line, "HARDCODED-PATH", HARDCODED_PATH_MESSAGE))
     budget, env_error = _skill_budget_words()
