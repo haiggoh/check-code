@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.4.5] — 2026-11-14
+
+### Added — Phase 2: committed portable package (COORDINATION C1/C2)
+
+- New `scripts/build-portable.py` generates the committed `portable/` package: same-name
+  manifest, the skill, the hook, and the CLI moved `bin/check-code.py` ->
+  `scripts/check-code.py` (top-level `bin/` blocks Chat/Cowork installs) with every
+  `${CLAUDE_PLUGIN_ROOT}/bin/check-code.py` reference in hooks.json and SKILL.md rewritten
+  to `scripts/`. Emits `portable/PORTABLE-BUILD.json` (haiggoh-portable-build/1) and
+  `dist/check-code-portable.zip` with the manifest at the zip root.
+- `tests/test_portable.py` pins freshness, same-name manifest, no `bin/`, no stale
+  references, closure completeness, the C2 schema, and a deterministic side-effect-free zip.
+- The strict-YAML glob covers `portable/skills/*/SKILL.md` too.
+
 ## [0.4.4] — 2026-11-14
 
 ### Fixed (desktop-migration FLEET Phase 1 P0: setup/check argv and result consistency)

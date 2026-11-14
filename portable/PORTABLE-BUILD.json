@@ -1,0 +1,64 @@
+{
+  "builder": "scripts/build-portable.py",
+  "builder_version": "1.0.0",
+  "components": [
+    {
+      "adaptation_class": "mechanical",
+      "evidence_level": "source-inspected",
+      "kind": "manifest",
+      "notes": "same name+version as the host manifest; an installed marketplace plugin wins over a synced copy in Code (loading.md name-conflict order), so no double-run",
+      "path": ".claude-plugin/plugin.json",
+      "surfaces": {
+        "chat": true,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "mechanical",
+      "evidence_level": "source-inspected",
+      "kind": "skill",
+      "notes": "CLI references rewritten bin/ -> scripts/ (no top-level bin/ in portable); strict-YAML frontmatter pinned by tests",
+      "path": "skills/check-code/SKILL.md",
+      "surfaces": {
+        "chat": true,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "mechanical",
+      "evidence_level": "source-inspected",
+      "kind": "hooks",
+      "notes": "Chat ignores plugin hooks, Cowork loads them, Code runs them; hook command rewritten to scripts/check-code.py",
+      "path": "hooks/hooks.json",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "mechanical",
+      "evidence_level": "source-inspected",
+      "kind": "hook-script",
+      "notes": "moved bin/ -> scripts/ per C1 (top-level bin blocks Chat/Cowork installs); self-contained stdlib script, no __file__-relative resources; hook entry point",
+      "path": "scripts/check-code.py",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    }
+  ],
+  "files": {
+    ".claude-plugin/plugin.json": "c0c042f3cb86a90c098cc058b9d09677008ed80e4e404d6eecd7a9d3971c3077",
+    "hooks/hooks.json": "5d4091d807785f4a4fc05a00fe345a6b557bc1ddc7086517a2c2ec9afbe6296a",
+    "scripts/check-code.py": "f183ae82d08a64e1185f7cb778d4df2c2f955efada8fa331fa0c9254ad2e1482",
+    "skills/check-code/SKILL.md": "dda77ca692520277dab3c8a434c6b0e776b27a7f4dcd2986527c47a6123f87ef"
+  },
+  "schema": "haiggoh-portable-build/1",
+  "source_commit": "586736f819966422f552a44695f6645fa485b92d",
+  "source_repo": "haiggoh/check-code",
+  "transform_version": "1"
+}
