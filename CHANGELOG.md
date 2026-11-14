@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.4] — 2026-11-14
+
+### Fixed (desktop-migration FLEET Phase 1 P0: setup/check argv and result consistency)
+
+- **`check` on a path that does not exist fails cleanly.** It used to die with a raw
+  `FileNotFoundError` traceback whose unhandled-exception exit code (1) is indistinguishable
+  from "findings found" — a script could not tell a typo from a lint failure. Now: one stderr
+  line naming the resolved path, exit 2 (the usage-error code). The hook path was already
+  safe by design (`check_edit`'s `is_file()` guard, fail-open); the CLI's explicit ask now
+  says so loudly instead of crashing.
+- **`check` output is line-sorted across its two halves.** Builtin-check findings printed in
+  discovery order while linter findings were sorted, so one report could read 9 before 3
+  with no reason. Both halves are sorted now; a test pins the interleaved order.
+- Probed and left as designed: the non-TTY `setup` gate (RC 2 + the `--yes is required`
+  stderr line — an earlier probe hidden by a pipe had suggested otherwise), and the
+  hook/CLI split on missing files (silent for the hook, loud for the explicit CLI ask).
+
 ## [0.4.3] — 2026-11-03
 
 ### Added — 🩻🔬 branded setup menu (menu-restyle batch, user spec 2026-11-03)

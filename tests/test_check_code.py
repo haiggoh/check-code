@@ -1220,3 +1220,36 @@ def test_setup_without_tty_requires_a_tier():
     r = subprocess.run([sys.executable, str(SCRIPT), "setup"], capture_output=True, text=True,
                        env=dict(os.environ), input="")
     assert r.returncode == 2 and "tier" in r.stderr.lower()
+
+
+def test_check_missing_file_clean_error_exit_2():
+    """`check` on a path that does not exist must fail CLEANLY: one stderr line naming the
+    path, exit 2 (the usage-error code) — never a raw FileNotFoundError traceback whose
+    unhandled-exception exit 1 is indistinguishable from "findings found" (P0 2026-11-13,
+    probed: a traceback and rc=1). The hook treats a missing file as no-findings by design
+    (check_edit's is_file guard, fail-open); the CLI's explicit ask must say so loudly
+    instead of crashing."""
+    r = subprocess.run(
+        [sys.executable, str(SCRIPT), "check", "/nonexistent/definitely-absent.py"],
+        capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "FileNotFoundError" not in r.stderr, r.stderr
+    assert "no such file" in r.stderr.lower(), r.stderr
+
+
+def test_check_report_is_line_sorted_across_builtins_and_linters(tmp_path, monkeypatch, capsys):
+    """cmd_check printed builtin findings UNSORTED but linter findings sorted — one report,
+    one order. The halves must interleave line-ascending or a reader sees 9 before 3 with
+    no reason."""
+    f = tmp_path / "sample.py"
+    f.write_text("x = 1\n")
+    monkeypatch.setattr(cc, "builtin_findings",
+                        lambda path, content, tool, sid:
+                            [(9, "B-LATER", "later"), (3, "B-EARLY", "earlier")])
+    monkeypatch.setattr(cc, "linters_for", lambda path, linters: [])
+    monkeypatch.setattr(cc, "load_linters", lambda: [])
+    rc = cc.cmd_check(argparse.Namespace(file=str(f)))
+    out = capsys.readouterr().out
+    assert rc == 1
+    printed = [ln for ln in out.splitlines() if ":3 " in ln or ":9 " in ln]
+    assert printed == sorted(printed), out

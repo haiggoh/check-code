@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.4.3"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.4"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -922,9 +922,15 @@ def cmd_setup(args):
 
 def cmd_check(args):
     path = Path(args.file).resolve()
+    if not path.is_file():
+        # The hook treats a missing file as no-findings (fail-open, a file may be deleted
+        # mid-session); an EXPLICIT CLI ask must say so loudly instead of crashing with a
+        # raw FileNotFoundError whose unhandled-exception exit 1 reads as "findings found".
+        print("check-code: no such file: %s" % path, file=sys.stderr)
+        return 2
     status = 0
-    for line, code, message in builtin_findings(
-            path, path.read_text(encoding="utf-8", errors="replace"), "check", None):
+    for line, code, message in sorted(builtin_findings(
+            path, path.read_text(encoding="utf-8", errors="replace"), "check", None)):
         print("%s:%d %s %s" % (path.name, line, code, message))
         status = 1
     linters = linters_for(path, load_linters())
