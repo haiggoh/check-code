@@ -921,29 +921,37 @@ def cmd_setup(args):
 # ---------------------------------------------------------------- CLI
 
 def cmd_check(args):
-    path = Path(args.file).resolve()
-    if not path.is_file():
+    # Validate on the path AS GIVEN, before resolve(): resolve() maps a dangling symlink to
+    # its nonexistent target, and the error must name what the user typed (review finding 3).
+    given = Path(args.file)
+    if not given.exists():
         # The hook treats a missing file as no-findings (fail-open, a file may be deleted
         # mid-session); an EXPLICIT CLI ask must say so loudly instead of crashing with a
         # raw FileNotFoundError whose unhandled-exception exit 1 reads as "findings found".
-        print("check-code: no such file: %s" % path, file=sys.stderr)
+        print("check-code: no such file: %s" % given, file=sys.stderr)
         return 2
-    status = 0
-    for line, code, message in sorted(builtin_findings(
-            path, path.read_text(encoding="utf-8", errors="replace"), "check", None)):
-        print("%s:%d %s %s" % (path.name, line, code, message))
-        status = 1
+    if not given.is_file():
+        print("check-code: not a regular file: %s" % given, file=sys.stderr)
+        return 2
+    path = given.resolve()
+    # ONE report, ONE order: builtin and linter findings are collected into a single list
+    # and printed sorted together — the two separate loops never interleaved, so a builtin
+    # on line 9 printed before a linter finding on line 3 no matter what (review finding 1).
+    findings = list(builtin_findings(
+        path, path.read_text(encoding="utf-8", errors="replace"), "check", None))
     linters = linters_for(path, load_linters())
-    if not linters and status == 0:
+    if not linters and not findings:
         print("no linter configured for %s" % path.name)
         return 0
     for linter in linters:
         if not find_binary(linter["binary"]):
             print("%s: not installed (%s)" % (linter["id"], install_hint(linter)))
             continue
-        for line, code, message in sorted(run_linter(linter, path)):
-            print("%s:%d %s %s" % (path.name, line, code, message))
-            status = 1
+        findings.extend(run_linter(linter, path))
+    status = 0
+    for line, code, message in sorted(findings):
+        print("%s:%d %s %s" % (path.name, line, code, message))
+        status = 1
     return status
 
 
@@ -987,7 +995,8 @@ def main(argv=None):
     parser.add_argument("--version", action="version", version=VERSION)
     sub = parser.add_subparsers(dest="cmd", metavar="COMMAND")
     sub.add_parser("hook", help="PostToolUse entry point (reads hook JSON on stdin)")
-    p = sub.add_parser("check", help="lint a whole FILE the way the hook would")
+    p = sub.add_parser("check", help="lint a whole FILE the way the hook would "
+                                     "(a missing file: exit 2, unlike the hook)")
     p.add_argument("file")
     sub.add_parser("doctor", help="show which linters are installed")
     s = sub.add_parser("setup", help="install a tier's linters and record the choice",

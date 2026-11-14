@@ -10,9 +10,22 @@
   line naming the resolved path, exit 2 (the usage-error code). The hook path was already
   safe by design (`check_edit`'s `is_file()` guard, fail-open); the CLI's explicit ask now
   says so loudly instead of crashing.
-- **`check` output is line-sorted across its two halves.** Builtin-check findings printed in
-  discovery order while linter findings were sorted, so one report could read 9 before 3
-  with no reason. Both halves are sorted now; a test pins the interleaved order.
+- **`check` output is ONE line-sorted report.** Builtin-check findings printed in discovery
+  order while linter findings were sorted — and even sorted, the two halves printed in two
+  separate loops that never interleaved (a builtin on line 9 always preceded a linter finding
+  on line 3). Findings are now collected from builtins and all installed linters into one
+  list and printed sorted together; a test drives a builtin at line 9 against a linter
+  finding at line 3 and demands 3 first.
+- **Error paths name what you typed.** A missing file: `no such file: <path>`, exit 2. An
+  existing directory: `not a regular file` (it is not missing). A dangling symlink: the
+  error names the symlink as given — the path is validated before `resolve()`, which used
+  to map the error to a target the user never typed (review round, Gemini 3.8 Flash:
+  blocker = the interleaving claim above was false and the first test mocked the linters
+  away, proving only half the contract; minors = the directory/symlink messages and a test
+  pinning the hook's silent fail-open on a missing file).
+- `check --help` states the CLI side of the hook/CLI split ("a missing file: exit 2, unlike
+  the hook"); a new test pins the hook's silent fail-open so the two contracts cannot be
+  silently unified.
 - Probed and left as designed: the non-TTY `setup` gate (RC 2 + the `--yes is required`
   stderr line — an earlier probe hidden by a pipe had suggested otherwise), and the
   hook/CLI split on missing files (silent for the hook, loud for the explicit CLI ask).

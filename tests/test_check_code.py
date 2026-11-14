@@ -1237,19 +1237,60 @@ def test_check_missing_file_clean_error_exit_2():
     assert "no such file" in r.stderr.lower(), r.stderr
 
 
-def test_check_report_is_line_sorted_across_builtins_and_linters(tmp_path, monkeypatch, capsys):
-    """cmd_check printed builtin findings UNSORTED but linter findings sorted — one report,
-    one order. The halves must interleave line-ascending or a reader sees 9 before 3 with
-    no reason."""
+def test_check_report_interleaves_builtins_and_linters(tmp_path, monkeypatch, capsys):
+    """ONE report, ONE order: cmd_check ran two separate loops (builtins, then each linter),
+    so a builtin on line 9 always printed before a linter finding on line 3 no matter how
+    each half was sorted. The first cut of this test mocked linters_for to [] and only ever
+    proved builtins sort among themselves — the review (Gemini 3.8 Flash) called it a false
+    green and it was: the halves never interleaved. This test puts a builtin at line 9 and
+    a LINTER finding at line 3 and demands 3 prints first."""
     f = tmp_path / "sample.py"
     f.write_text("x = 1\n")
     monkeypatch.setattr(cc, "builtin_findings",
-                        lambda path, content, tool, sid:
-                            [(9, "B-LATER", "later"), (3, "B-EARLY", "earlier")])
-    monkeypatch.setattr(cc, "linters_for", lambda path, linters: [])
+                        lambda path, content, tool, sid: [(9, "B-LATER", "later")])
+    monkeypatch.setattr(cc, "linters_for", lambda path, linters: [{"id": "fake", "binary": "fake-bin"}])
     monkeypatch.setattr(cc, "load_linters", lambda: [])
+    monkeypatch.setattr(cc, "find_binary", lambda b: "/fake/" + b)
+    monkeypatch.setattr(cc, "run_linter", lambda linter, path: [(3, "R-EARLY", "linter found this")])
     rc = cc.cmd_check(argparse.Namespace(file=str(f)))
     out = capsys.readouterr().out
     assert rc == 1
-    printed = [ln for ln in out.splitlines() if ":3 " in ln or ":9 " in ln]
-    assert printed == sorted(printed), out
+    lines = [ln for ln in out.splitlines() if ":3 " in ln or ":9 " in ln]
+    assert [ln.split()[0] for ln in lines] == ["sample.py:3", "sample.py:9"], out
+
+
+def test_check_directory_is_not_a_file_error(tmp_path):
+    """An existing DIRECTORY is not "no such file" — it exists; the message must say what
+    is wrong (not a regular file), both exit 2 (review finding 2)."""
+    r = subprocess.run([sys.executable, str(SCRIPT), "check", str(tmp_path)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "not a regular file" in r.stderr, r.stderr
+    assert "no such file" not in r.stderr, r.stderr
+
+
+def test_check_broken_symlink_error_names_the_typed_path(tmp_path):
+    """resolve() ran BEFORE the existence check, so a dangling symlink's error named the
+    nonexistent TARGET the user never typed (review finding 3). The check must run on the
+    path as given."""
+    target = tmp_path / "gone.py"          # never created
+    link = tmp_path / "broken.py"
+    link.symlink_to(target)
+    r = subprocess.run([sys.executable, str(SCRIPT), "check", str(link)],
+                       capture_output=True, text=True, timeout=30)
+    assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
+    assert "broken.py" in r.stderr, r.stderr
+
+
+def test_hook_missing_file_is_silent_fail_open(tmp_path):
+    """Pins the OTHER side of the hook/CLI split: a hook payload naming a deleted file must
+    produce NO output and rc 0 — fail-open. A maintainer unifying the two contracts would
+    turn every delete-then-edit into a hook error; this test makes that loud."""
+    out, old = io.StringIO(), sys.stdout
+    sys.stdout = out
+    try:
+        code = cc.run_hook(io.StringIO(json.dumps(edit_payload(tmp_path / "deleted.py", "x"))))
+    finally:
+        sys.stdout = old
+    assert code == 0
+    assert out.getvalue() == ""
