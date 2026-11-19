@@ -1189,6 +1189,50 @@ def test_setup_menu_opens_with_the_branded_title_and_subtitle():
     assert cc.SETUP_MENU.index("🩻🔬 Check Code") < cc.SETUP_MENU.index("check-code setup")
 
 
+# ------------------------------------------- 0.5.0: help/menu text built FROM the catalog
+
+def test_help_epilog_lists_every_catalog_linter():
+    for lin in cc.BUILTIN:
+        assert lin["id"] in cc.HELP_EPILOG, lin["id"]
+
+
+def test_help_cli_lists_every_catalog_linter():
+    r = cli("--help")
+    assert r.returncode == 0
+    for lin in cc.BUILTIN:
+        assert lin["id"] in r.stdout, lin["id"]
+
+
+def test_setup_help_cli_lists_every_catalog_linter():
+    r = cli("setup", "--help")
+    assert r.returncode == 0
+    for lin in cc.BUILTIN:
+        assert lin["id"] in r.stdout, lin["id"]
+
+
+def test_setup_epilog_lists_every_catalog_linter():
+    for lin in cc.BUILTIN:
+        assert lin["id"] in cc.SETUP_EPILOG, lin["id"]
+
+
+def test_setup_menu_lists_every_catalog_linter_on_its_tier_line():
+    menu = cc.SETUP_MENU
+    seg_poly = menu[menu.index("1) polyglot"):menu.index("2) basic")]
+    seg_basic = menu[menu.index("2) basic"):menu.index("3) none")]
+    for lin in cc.BUILTIN:
+        # polyglot covers basic too (tier_covers), so its line lists every catalog linter
+        assert lin["id"] in seg_poly, lin["id"]
+        if lin["tier"] == "basic":
+            assert lin["id"] in seg_basic, lin["id"]
+
+
+def test_tier_summary_polyglot_covers_every_catalog_linter():
+    # the same rule setup_plan installs by: polyglot includes the basic linters
+    for lin in cc.BUILTIN:
+        assert cc.tier_covers("polyglot", lin["tier"])
+        assert lin["id"] in cc._tier_summary("polyglot"), lin["id"]
+
+
 # ---------------------------------------------------------------- setup CLI (real subprocess)
 
 def test_setup_help_documents_tiers_and_env():

@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -43,40 +44,8 @@ TIERS = ("basic", "polyglot", "none")
 # know they will not use those languages.
 DEFAULT_TIER = "polyglot"
 
-HELP_EPILOG = """\
-linters (each runs only if installed):
-  python   ruff check          install: pipx install ruff
-  shell    shellcheck          install: brew install shellcheck   (.sh/.bash/.ksh, or a sh/bash shebang)
-  ts/js    biome lint          install: brew install biome         (.ts/.tsx/.js/.jsx)
-  swift    swiftlint           install: brew install swiftlint     (.swift)
-  ruby     rubocop --lint      install: brew install rubocop        (.rb)
-  actions  actionlint          install: brew install actionlint    (.github/workflows/*.ya?ml)
-  extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
-setup (the preferred way to get them):
-  setup --tier polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint -- the
-                         recommended default: Enter in the menu, and what 'setup --yes' installs
-  setup --tier basic     ruff + shellcheck only (opt in if you know you will not touch the rest)
-  setup --tier none      no external linters; built-in checks stay on, coverage notices go quiet
-  Run it in a terminal for the menu; --dry-run shows the plan without changing anything.
-  The chosen tier is recorded in $CHECK_CODE_HOME/config.json ("setup --help" has the details).
-built-in checks (always on, no linter needed):
-  STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
-  NO-HELP      a Write of a new script file with no argument parsing / --help handling
-  HARDCODED-PATH  a literal /Users/<name>/ home, ClaudeWorkspace/<name> checkout, or
-               plugin-cache VERSION path on a touched line — use ~/…, $HOME/… or an env
-               override instead ($TMP-built test-fixture lines, CHANGELOGs and plan/doc
-               prose are exempt; skills/*.md still checked — it ships)
-  SKILL-BUDGET a SKILL.md whose body after frontmatter exceeds 1500 words
-               (CHECK_CODE_SKILL_BUDGET_WORDS overrides; once per file per session)
-  MENU-NAV     a menu row giving NAVIGATION a number ("5) Exit"): house grammar is
-               numbers = actions, letters = navigation (q Quit, b Back)
-
-environment:
-  CHECK_CODE_OFF=1        disable the hook
-  CHECK_CODE_MAX          max findings reported per edit (default 10)
-  CHECK_CODE_HOME         config dir (default ~/.claude/check-code)
-  CHECK_CODE_DEBUG=1      log hook exceptions to $CHECK_CODE_HOME/debug.log
-"""
+# HELP_EPILOG is built from BUILTIN further down (after the catalog and install_hint),
+# so the linter list in --help cannot drift from the catalog again (0.5.0).
 
 
 # ---------------------------------------------------------------- config
@@ -313,6 +282,92 @@ def install_hint(linter):
         return install
     cmd = install.get("cmd", [])
     return cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
+
+
+# ------------------------------------------- help/menu text, generated FROM the catalog
+# The linter lists shown by --help, the setup menu and setup --help used to be hand-copied,
+# and they drifted: 0.4.6 added typescript-lsp to BUILTIN but to none of the three texts.
+# Every line below reads BUILTIN, so a new entry appears in all three by construction.
+
+def _tier_ids(tier):
+    """Every linter the tier covers (polyglot includes the basic ones — same rule
+    setup_plan installs by), in catalog order."""
+    return [lin["id"] for lin in BUILTIN if tier_covers(tier, lin["tier"])]
+
+
+def _tier_languages(tier):
+    """The covered linters' language labels, in catalog order, each once."""
+    langs = []
+    for lin in BUILTIN:
+        if tier_covers(tier, lin["tier"]) and lin["language"] not in langs:
+            langs.append(lin["language"])
+    return langs
+
+
+def _tier_summary(tier):
+    """'ruff + shellcheck' — the tier's linter ids joined for prose."""
+    return " + ".join(_tier_ids(tier))
+
+
+def _linter_help_line(lin):
+    """One 'linters' help line for a catalog entry. No-arg derivations only, so the text
+    can never outrun the catalog: language label, id, install hint, then what it matches."""
+    match = []
+    if lin.get("ext"):
+        match.append("/".join("." + e for e in lin["ext"]))
+    if lin.get("shebang"):
+        match.append("or a matching shebang")
+    if lin.get("path_regex"):
+        match.append("matched by path " + lin["path_regex"])
+    detail = "   (%s)" % ", ".join(match) if match else ""
+    return "  %-9s %-15s install: %-40s%s" % (lin["language"].lower(), lin["id"],
+                                              install_hint(lin), detail)
+
+
+def _wrap(text, indent=12, width=96):
+    return textwrap.fill(text, width=width, subsequent_indent=" " * indent,
+                         break_on_hyphens=False)
+
+
+def _build_help_epilog():
+    linter_lines = "\n".join(_linter_help_line(lin) for lin in BUILTIN)
+    poly = _tier_summary("polyglot")
+    basic = _tier_summary("basic")
+    return """\
+linters (each runs only if installed):
+%s
+  extra linters: add them to $CHECK_CODE_HOME/linters.local.json (see README)
+setup (the preferred way to get them):
+%s
+%s
+  setup --tier none      no external linters; built-in checks stay on, coverage notices go quiet
+  Run it in a terminal for the menu; --dry-run shows the plan without changing anything.
+  The chosen tier is recorded in $CHECK_CODE_HOME/config.json ("setup --help" has the details).
+built-in checks (always on, no linter needed):
+  STDERR-PIPE  python Popen/call/check_call with stderr=PIPE that nothing in the file drains
+  NO-HELP      a Write of a new script file with no argument parsing / --help handling
+  HARDCODED-PATH  a literal /Users/<name>/ home, ClaudeWorkspace/<name> checkout, or
+               plugin-cache VERSION path on a touched line — use ~/…, $HOME/… or an env
+               override instead ($TMP-built test-fixture lines, CHANGELOGs and plan/doc
+               prose are exempt; skills/*.md still checked — it ships)
+  SKILL-BUDGET a SKILL.md whose body after frontmatter exceeds 1500 words
+               (CHECK_CODE_SKILL_BUDGET_WORDS overrides; once per file per session)
+  MENU-NAV     a menu row giving NAVIGATION a number ("5) Exit"): house grammar is
+               numbers = actions, letters = navigation (q Quit, b Back)
+
+environment:
+  CHECK_CODE_OFF=1        disable the hook
+  CHECK_CODE_MAX          max findings reported per edit (default 10)
+  CHECK_CODE_HOME         config dir (default ~/.claude/check-code)
+  CHECK_CODE_DEBUG=1      log hook exceptions to $CHECK_CODE_HOME/debug.log
+""" % (linter_lines,
+       _wrap("  setup --tier polyglot  %s -- the recommended default: Enter in the menu, and "
+             "what 'setup --yes' installs when --tier is not given" % poly),
+       _wrap("  setup --tier basic     %s only -- opt in if you know you will not touch the "
+             "polyglot languages" % basic))
+
+
+HELP_EPILOG = _build_help_epilog()
 
 
 def load_linters():
@@ -791,28 +846,36 @@ def run_hook(stdin):
 
 INSTALL_TIMEOUT = 600  # seconds per install command (a brew bottle can be large)
 
-SETUP_MENU = """\
-🩻🔬 Check Code
-   Lints the lines Claude just edited
-========================================================================
+def _build_setup_menu():
+    head = ("🩻🔬 Check Code\n"
+            "   Lints the lines Claude just edited\n"
+            + "=" * 72 + "\n\n"
+            + "check-code setup — choose linter coverage\n\n")
+    items = [
+        "  1) polyglot  %s: %s -- recommended, and the default (Enter)"
+        % (_tier_summary("polyglot"), ", ".join(_tier_languages("polyglot"))),
+        "  2) basic     %s only: %s"
+        % (_tier_summary("basic"), ", ".join(_tier_languages("basic"))),
+        "  3) none      no external linters; built-in checks still run and coverage notices stay silent",
+    ]
+    body = "\n".join(_wrap(item, indent=15) for item in items)
+    return head + body + "\n\n  Enter = polyglot    q) Quit\n"
 
-check-code setup — choose linter coverage
 
-  1) polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint: Python, shell, TS/JS,
-               Swift, Ruby, GitHub Actions -- recommended, and the default (Enter)
-  2) basic     ruff + shellcheck only: Python and shell
-  3) none      no external linters; built-in checks still run and coverage notices stay silent
+SETUP_MENU = _build_setup_menu()
 
-  Enter = polyglot    q) Quit
-"""
 
-SETUP_EPILOG = """\
+def _build_setup_epilog():
+    poly = _wrap("  polyglot  %s (%s) -- the recommended default: Enter in the menu, and what "
+                 "'setup --yes' installs when --tier is not given"
+                 % (_tier_summary("polyglot"), ", ".join(_tier_languages("polyglot"))))
+    basic = _wrap("  basic     %s (%s) -- opt in if you know you will not touch the polyglot "
+                  "languages"
+                  % (_tier_summary("basic"), ", ".join(_tier_languages("basic"))))
+    return """\
 tiers:
-  polyglot  ruff + shellcheck + biome, swiftlint, rubocop, actionlint (Python, shell, TS/JS,
-            Swift, Ruby, GitHub Actions) -- the recommended default: Enter in the menu, and
-            what 'setup --yes' installs when --tier is not given
-  basic     ruff + shellcheck (Python, shell) -- opt in if you know you will not touch the
-            polyglot languages
+%s
+%s
   none      no external linters: built-in checks still run and coverage notices stay silent
 interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
 plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
@@ -822,7 +885,10 @@ the installer's exit code.
 environment:
   CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
                     (default ~/.claude/check-code)
-"""
+""" % (poly, basic)
+
+
+SETUP_EPILOG = _build_setup_epilog()
 
 
 def _isatty():

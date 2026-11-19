@@ -54,11 +54,11 @@
   "files": {
     ".claude-plugin/plugin.json": "47d908f647a3cfa68631fa99aaa3bde4f216c741766cacbdfb4c8438b562b661",
     "hooks/hooks.json": "5d4091d807785f4a4fc05a00fe345a6b557bc1ddc7086517a2c2ec9afbe6296a",
-    "scripts/check-code.py": "f9d85cb9dadeaf52be14bd015779be9017cf72ec2f79adea1ed58c3a75143244",
+    "scripts/check-code.py": "baa2bb22b45e5a6023995e35e3dcca0a541713ff52fab724b358f7df19a03bed",
     "skills/check-code/SKILL.md": "dda77ca692520277dab3c8a434c6b0e776b27a7f4dcd2986527c47a6123f87ef"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "219032d7ab43a4b65051a60f49f3df94580dc684",
+  "source_commit": "4c171ddd50e8a58721f1756cafd9de6250dde668",
   "source_repo": "haiggoh/check-code",
   "transform_version": "1"
 }
