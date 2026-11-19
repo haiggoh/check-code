@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.5.0] — 2026-11-19
+
+### Added — auto-install: missing tier linters install themselves at session start
+- New `sync` subcommand, wired as a `SessionStart` hook (timeout 5 s, fail-open, returns in
+  < 1 s): it never installs anything itself. It reports a previous background worker's results
+  ONCE (`installed: …` / `could not install <id>: <reason> — run: <cmd>`), then — a fast
+  binary check only — spawns ONE detached `sync --worker` when linters of the recorded tier
+  (else the `polyglot` default) are missing.
+- The worker re-checks the whole tier with readiness (binary AND functional probe), installs
+  what is missing through the catalog's package manager, records `installed`/`failed` per id
+  into `$CHECK_CODE_HOME/sync-state.json` (a failed install is retried at most once per 24 h),
+  and releases the `sync.lock` (O_EXCL, stale after 30 min) so two sessions starting at once
+  still produce exactly one installer. No package manager: one line naming the command to run
+  yourself, once. Logs: `$CHECK_CODE_HOME/sync.log`.
+- Opt out with `setup --tier none` (nothing is ever installed) or `basic`; `setup` remains the
+  way to choose a tier up front. The coverage notices (C3/C4) now say installs happen
+  automatically at the next session start.
+- This closes the 0.4.6 flaw: that update added `typescript-lsp` to the catalog but no update
+  path installed it — a user had to proactively know to run `setup` again.
+
+### Fixed — typescript-lsp driver reported JSX as comparison-operator errors; tsconfig invisible
+- `languageId` was hardcoded `typescript`, so `.tsx` JSX was parsed as casts (`2365`/`2304` on
+  every JSX file, measured 244 false findings). Now derived from the extension
+  (`typescriptreact`/`javascriptreact`/…).
+- `rootUri` was the file's directory, so tsserver missed the project's tsconfig (`jsx`,
+  `jsxFactory`). Now the nearest `tsconfig.json`/`jsconfig.json`/`package.json` ancestor, else
+  the git top level. `scripts/probe/bad.ts` fixture: exactly the planted `2322` remains.
+- brew's typescript lib (`opt/…/libexec/lib/node_modules/typescript/lib`) added to the
+  `_tsserver_lib` candidates.
+
+### Changed — "installed" now means working, and the help text cannot drift from the catalog
+- Catalog entries may carry a `probe`: typescript-lsp probes by running the driver on
+  `scripts/probe/bad.ts` and requiring the planted `2322` in the output. `linter_ready()` =
+  binary resolves AND probe passes; `setup_plan` and the post-install verify use it, so a
+  present-but-broken linter (stub typescript lib → `noServer`) is planned as an install, and
+  the typescript-lsp install command now pulls `typescript` as well as
+  `typescript-language-server`.
+- `--help`, `setup --help` and the setup menu are generated from `BUILTIN` (they had drifted:
+  typescript-lsp was in none of them). Tier lines use `tier_covers`, so the polyglot line
+  lists the basic linters too, as `setup` installs them.
+
 ## [0.4.7] — 2026-11-19
 
 ### Fixed — LSP linters get their own per-run timeout (LSP_TIMEOUT=60s); typescript-lsp no longer crashes check on a one-line file (TimeoutExpired after 10s, measured). 3 tests pin the split.

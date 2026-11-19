@@ -17,12 +17,14 @@ installed and reports findings **on the lines the edit touched** (the whole file
   user agrees the rule doesn't fit.
 - Never rewrite unrelated lines to satisfy the linter. Old debt elsewhere in the file is out of
   scope unless the user asks.
-- `check-code: .ts edits are not linted — run "check-code.py setup" once to choose coverage (or
-  "setup --tier none" to silence this).` means no installed linter covers the file's language.
-  The one-time fix is `python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py setup --tier polyglot`
-  (menu on a terminal), not a per-package install.
-- `check-code: <linter> is missing but your "<tier>" tier includes it` means a linter the user's
-  recorded tier wanted went away. Re-run `setup` to repair it.
+- `check-code: .ts edits are not linted — missing linters install automatically at the next
+  session start …` means no installed linter covers the file's language. The install happens on
+  its own at the next session start; `python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py setup
+  --tier polyglot` (menu on a terminal) does it right now, and `setup --tier none` silences the
+  notice instead.
+- `check-code: <linter> is missing but your "<tier>" tier includes it — it installs automatically
+  at the next session start` means a linter the recorded tier wanted went away; it repairs
+  itself, or re-run `setup` to do it immediately.
 
 ## The built-in codes
 

@@ -20,10 +20,12 @@ check-code: 1 issue(s) in the lines you just edited in deploy.sh -- fix them now
 - **The repo's config wins.** If the project has `ruff.toml`, `[tool.ruff]` in `pyproject.toml`, or
   `.shellcheckrc`, those rules apply unchanged. Without one, a pinned, conservative rule set is used.
   It is pinned because a linter's own default set can change between versions and suddenly flood you.
-- **Get the linters up front.** `check-code.py setup` installs a coverage tier and records the
-  choice, so a missing dependency is discovered on purpose, never mid-edit. Until setup has run
-  (or when a linter recorded for coverage goes missing), check-code prints at most one quiet line
-  per session pointing at `setup` — never an install command, never a repeat.
+- **Get the linters up front.** An update that adds a linter to the catalog installs it
+  automatically at the next session start (see Auto-install below), so a missing dependency is
+  discovered on purpose, never mid-edit. `check-code.py setup` remains the way to choose a
+  coverage tier and install it on the spot. Until setup has run (or when a linter recorded for
+  coverage goes missing), check-code prints at most one quiet line per session pointing at the
+  automatic install — never an install command, never a repeat.
 - **Never block, never cost.** Findings are context for Claude, not a gate. A clean edit produces
   no output and no tokens. Any error (timeout, crash, bad input) means no output and exit 0.
 
@@ -41,6 +43,7 @@ Tier `polyglot` (add these; each verified single-file, zero-config, machine-pars
 | Language | Linter | Picked by | Default rules (no repo config) |
 |---|---|---|---|
 | TS/JS | `biome lint` | `.ts`, `.tsx`, `.js`, `.jsx` | biome's recommended set (a repo `biome.json` still wins) |
+| TS/JS | `typescript-lsp` | `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs`, `.cjs` | tsserver's semantic diagnostics; a repo `tsconfig.json` is respected (JSX included) |
 | Swift | `swiftlint lint` | `.swift` | swiftlint's default rules (a repo `.swiftlint.yml` still wins) |
 | Ruby | `rubocop --lint` | `.rb` | the Lint department only: error-class cops, as ruff's set is pinned |
 | Actions | `actionlint` | `.github/workflows/*.ya?ml` | every check (schema, expressions, shell names, …) |
@@ -62,9 +65,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --yes            # scrip
 
 | Tier | Installs | Covers |
 |---|---|---|
-| `polyglot` — the default, recommended | ruff, shellcheck, biome, swiftlint, rubocop, actionlint | Python, shell, TS/JS, Swift, Ruby, GitHub Actions workflows |
+| `polyglot` — the default, recommended | ruff, shellcheck, biome, typescript-lsp, swiftlint, rubocop, actionlint | Python, shell, TS/JS (style + types), Swift, Ruby, GitHub Actions workflows |
 | `basic` — opt in | ruff, shellcheck | Python and shell |
-| `none` — opt in | nothing | built-in checks only; coverage notices stay silent |
+| `none` — opt in | nothing | built-in checks only; auto-install and coverage notices stay silent |
 
 **polyglot is the default and opting out is yours.** The installs are small and being prepared
 beats discovering a missing linter mid-edit; choose `basic` or `none` only if you know you will
@@ -79,6 +82,26 @@ the command and continues. Each install is then verified **by outcome**: the bin
 re-resolved, so the report says `installed` / `FAILED`, not whatever the installer's exit code
 claimed. The chosen tier is recorded in `$CHECK_CODE_HOME/config.json`; re-running `setup` is
 idempotent and may change it — `doctor` shows the current one.
+
+## Auto-install: missing linters install themselves at session start
+
+A `SessionStart` hook runs `check-code.py sync` (5 s timeout, fail-open, returns in under a
+second — it never installs anything itself). If linters of the recorded tier (or the `polyglot`
+default when `setup` never ran) are **missing**, it spawns one detached worker
+(`sync --worker`) and prints a single line — `🩻 check-code: installing <ids> for your
+<polyglot> tier in the background`. The worker installs what is missing through the package
+manager the catalog names (never `sudo`), re-checks each one **by outcome** (a typescript-lsp
+probe runs the server on a fixture with one planted error, so a present-but-broken install
+counts as failed), records the per-id result, and the next session's `sync` reports it once:
+`installed: …` or `could not install <id>: <reason> — run: <cmd>`.
+
+- One installer ever: `sync.lock` (stale after 30 min), so two sessions starting at once do
+  not double-install.
+- A failed install is retried at most once per 24 h — a broken package cannot loop.
+- No `brew`/`pipx` on the machine: one line naming the command to run yourself, shown once.
+- Opt out: `setup --tier none` (nothing is ever installed or announced) or `basic`.
+- State lives in `$CHECK_CODE_HOME` (`sync-state.json`, the `sync.lock`, `sync.log`); delete
+  them to force a fresh pass.
 
 ## Built-in checks
 
@@ -118,6 +141,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" --help
   check FILE    lint a whole file the way the hook would
   doctor        which linters are installed, and the recorded coverage tier
   setup         choose a coverage tier and install its linters (--tier/--yes/--dry-run)
+  sync          SessionStart entry: install missing tier linters in the background
 ```
 
 | Env var | Effect |
@@ -143,11 +167,12 @@ Requires `python3` 3.9+. Then pick your coverage — one run, not per-package in
 python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --yes   # polyglot: the default
 ```
 
-`polyglot` (ruff + shellcheck + biome, swiftlint, rubocop, actionlint) is the recommended
-default — Python, shell, TS/JS, Swift, Ruby and GitHub Actions covered, installs kept small on
-purpose. `basic` (ruff + shellcheck) is the opt-in if you know you will not touch the other
-languages, and `none` deliberately runs no external linter. The hook works before this too —
-see Setup for what each tier covers.
+`polyglot` (ruff + shellcheck + biome + typescript-lsp, swiftlint, rubocop, actionlint) is the
+recommended default — Python, shell, TS/JS, Swift, Ruby and GitHub Actions covered, installs
+kept small on purpose. `basic` (ruff + shellcheck) is the opt-in if you know you will not touch
+the other languages, and `none` deliberately runs no external linter. The hook works before
+this too: even without `setup`, missing tier linters install automatically at the next session
+start (see Auto-install), and `doctor` shows what is there — see Setup for what each tier covers.
 
 ## How it relates to other review tools
 

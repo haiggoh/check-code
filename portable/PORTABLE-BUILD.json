@@ -52,13 +52,13 @@
     }
   ],
   "files": {
-    ".claude-plugin/plugin.json": "47d908f647a3cfa68631fa99aaa3bde4f216c741766cacbdfb4c8438b562b661",
+    ".claude-plugin/plugin.json": "10e99927381030961c31336f5b9af042c0e57672acb9c757020b228f58f56085",
     "hooks/hooks.json": "71970c98eb3f5e379b8ef4b63ead7cda896c23d03aae6f6b5c7005c9afee032a",
-    "scripts/check-code.py": "39243047150221107a575d65e4643fc1d23db360e2d059b9c34debdeb4c6eaf9",
-    "skills/check-code/SKILL.md": "dda77ca692520277dab3c8a434c6b0e776b27a7f4dcd2986527c47a6123f87ef"
+    "scripts/check-code.py": "ec34414f733a3456e8d1159ff1b0c22d92f4df1379920310bc771a76f427d4aa",
+    "skills/check-code/SKILL.md": "11f60fd31e9c617150f26be1e4e98512cb7e1fd73e5ea0444b6edf06fb5d8ad3"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "3680efd774e8852ae86488cb0962ad393711be8d",
+  "source_commit": "b1345e00b3f10cf960592f1155cd46c3023314ad",
   "source_repo": "haiggoh/check-code",
   "transform_version": "1"
 }
