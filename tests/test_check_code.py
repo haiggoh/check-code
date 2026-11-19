@@ -235,6 +235,20 @@ def test_doctor_lists_builtins():
     assert "ruff" in r.stdout and "shellcheck" in r.stdout
 
 
+def test_doctor_marks_probe_broken_linter_as_not_functional(monkeypatch, capsys):
+    """0.5.1 deferred minor: doctor must not call a present-but-broken linter "installed" —
+    the probe decides (same rule as sync/setup)."""
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    monkeypatch.setattr(cc, "load_linters", lambda: [dict(lin)])
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/fake/" + name)
+    monkeypatch.setattr(cc, "linter_ready", lambda lin, probe_runner=None: False)
+    rc = cc.cmd_doctor(argparse.Namespace())
+    out = capsys.readouterr().out
+    assert "fake" in out and "NOT functional" in out
+    assert rc == 1                       # a broken linter cannot lint: counts as missing
+
+
 @needs_ruff
 def test_hook_via_subprocess_emits_hook_json(tmp_path):
     f = tmp_path / "m.py"

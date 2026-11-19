@@ -13,6 +13,7 @@ import selectors
 import subprocess
 import sys
 import time
+from urllib.parse import quote
 
 
 # LSP languageId per file extension: tsserver cannot tell a TSX generic from a
@@ -32,7 +33,14 @@ _PROJECT_MARKERS = ("tsconfig.json", "jsconfig.json", "package.json")
 
 def _language_id(path):
     """The LSP languageId for a file, by extension (case-insensitive)."""
-    return _LANGUAGE_IDS.get(os.path.splitext(path)[1].lower(), _LANGUAGE_ID_DEFAULT)
+    ext = os.path.splitext(path)[1]
+    return _LANGUAGE_IDS.get(ext.lower() if ext else "", _LANGUAGE_ID_DEFAULT)
+
+
+def _file_uri(path):
+    """file:// URI with percent-encoding — a path containing a space must not produce a
+    broken URI (LSP servers decode it before opening the file)."""
+    return "file://" + quote(os.path.abspath(path))
 
 
 def _project_root(path):
@@ -82,33 +90,36 @@ def _tsserver_lib():
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("file")
     a = ap.parse_args()
     path = os.path.abspath(a.file)
-    uri = "file://" + path
-    root = "file://" + _project_root(path)
+    uri = _file_uri(path)
+    root = _file_uri(_project_root(path))
     server = "typescript-language-server"
     lib = _tsserver_lib()
     init_opts = {"tsserver": {"path": lib}} if lib else {}
     p = subprocess.Popen([server, "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
-    if p.stdin is None or p.stdout is None:
+    # bind to non-Optional locals so the closures below type-check (Popen with PIPE
+    # always yields streams, but the type says Optional)
+    stdin, stdout = p.stdin, p.stdout
+    if stdin is None or stdout is None:
         return 2
 
     def send(obj):
         body = json.dumps(obj).encode()
-        p.stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
-        p.stdin.flush()
+        stdin.write(b"Content-Length: %d\r\n\r\n" % len(body) + body)
+        stdin.flush()
 
     def read_msg(timeout_s):
         sel = selectors.DefaultSelector()
-        sel.register(p.stdout, selectors.EVENT_READ)
+        sel.register(stdout, selectors.EVENT_READ)
         if not sel.select(timeout_s):
             return None
         headers = {}
         while True:
-            line = p.stdout.readline()
+            line = stdout.readline()
             if not line:
                 return None
             line = line.strip()
@@ -117,7 +128,7 @@ def main():
             k, _, v = line.decode().partition(":")
             headers[k.lower()] = v.strip()
         length = int(headers.get("content-length", "0"))
-        return json.loads(p.stdout.read(length)) if length else None
+        return json.loads(stdout.read(length)) if length else None
 
     send({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
         "processId": None, "rootUri": root, "capabilities": {},

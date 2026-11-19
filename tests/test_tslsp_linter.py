@@ -96,3 +96,9 @@ def test_tsx_in_a_project_reports_only_the_planted_error():
     codes = [str(d.get("code")) for line in r.stdout.splitlines() if line.strip()
              for d in json.loads(line)["params"]["diagnostics"]]
     assert codes == ["2322"], codes
+
+
+def test_file_uri_percent_encodes_spaces_and_keeps_plain_paths():
+    """0.5.1 deferred minor: a path with a space must not produce a broken file:// URI."""
+    assert tslsp._file_uri("/tmp/a b/c d.ts") == "file:///tmp/a%20b/c%20d.ts"
+    assert tslsp._file_uri("/plain/path.ts") == "file:///plain/path.ts"

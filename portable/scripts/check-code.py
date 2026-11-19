@@ -1330,12 +1330,16 @@ def cmd_doctor(_args):
     missing = 0
     for linter in linters:
         found = find_binary(linter["binary"])
-        if found:
-            missing += 0
+        # "installed" means functional: a probe-carrying linter must pass its probe, not
+        # merely sit on PATH (same rule as sync/setup since 0.5.0). Tier only decides what
+        # a MISSING linter counts as — an installed out-of-tier linter still runs.
+        if found and linter_ready(linter):
             print("%-11s %-8s %s" % (linter["id"], linter["language"], found))
             continue
         missing += 1
-        if recorded is not None and linter["tier"] != "local" \
+        if found:
+            note = "present but NOT functional (probe failed) — run: %s" % install_hint(linter)
+        elif recorded is not None and linter["tier"] != "local" \
                 and not tier_covers(recorded, linter["tier"]):
             note = "not in your tier (%s)" % recorded       # excluded on purpose: not MISSING
         else:
