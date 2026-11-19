@@ -260,8 +260,14 @@ BUILTIN = [
      "parse": _rubocop_parse},
     {"id": "typescript-lsp", "language": "TS (LSP)", "binary": "typescript-language-server",
      "tier": "polyglot",
-     "install": {"manager": "brew", "cmd": ["brew", "install", "typescript-language-server"]},
+     # brew's typescript-language-server ships only cli.mjs and its sibling typescript
+     # package can be a stub, so a bare install can be present but BROKEN (noServer on
+     # every request): the typescript lib installs with it, and the probe below is what
+     # decides "installed" (a functional probe, not a binary on PATH).
+     "install": {"manager": "brew",
+                 "cmd": ["brew", "install", "typescript-language-server", "typescript"]},
      "ext": ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"], "shebang": None,
+     "probe": {"fixture": "scripts/probe/bad.ts", "expect_code": "2322"},
      "command": _tslsp_command, "parse": _tslsp_parse},
     {"id": "actionlint", "language": "Actions", "binary": "actionlint", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "actionlint"]},
@@ -426,6 +432,43 @@ def run_linter(linter, path):
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                           cwd=str(path.parent))
     return linter["parse"](proc.stdout)
+
+
+def _default_probe(linter):
+    """The real functional probe: run the linter's own command on the catalog's probe
+    fixture and require the expected code in the parsed findings. Returns (ok, detail).
+    This is what separates a WORKING linter from a present-but-broken one."""
+    probe = linter.get("probe") or {}
+    fixture = (Path(__file__).resolve().parent.parent / str(probe.get("fixture") or "")).resolve()
+    if not fixture.is_file():
+        return False, "probe fixture missing: %s" % fixture
+    cmd = linter["command"](fixture)
+    cmd[0] = find_binary(cmd[0]) or cmd[0]
+    timeout = LSP_TIMEOUT if "lsp" in linter["id"] else LINT_TIMEOUT
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                              cwd=str(fixture.parent))
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, "probe crashed: %s" % exc
+    codes = [str(code) for _line, code, _msg in linter["parse"](proc.stdout)]
+    expect = str(probe.get("expect_code") or "")
+    if expect and expect in codes:
+        return True, "probe ok (%s reported)" % expect
+    return False, "probe did not report %s (got: %s)" % (expect, ", ".join(codes) or "nothing")
+
+
+def linter_ready(linter, probe_runner=None):
+    """A linter is ready only if its binary resolves AND its functional probe passes (when
+    the catalog defines one). A present-but-broken binary — e.g. typescript-language-server
+    whose typescript lib is a stub, so every tsserverRequest answers noServer — is NOT
+    ready. probe_runner is injectable so tests never start a real linter."""
+    if not find_binary(linter["binary"]):
+        return False
+    if "probe" not in linter:
+        return True
+    runner = probe_runner or _default_probe
+    ok, _detail = runner(linter)
+    return ok
 
 
 # ---------------------------------------------------------------- touched lines
@@ -910,17 +953,18 @@ def _run_install(cmd):
     return proc.returncode == 0, reason
 
 
-def setup_plan(tier):
-    """[(linter, status, detail)] for the tier: installed / install / cannot."""
+def setup_plan(tier, probe_runner=None):
+    """[(linter, status, detail)] for the tier: installed / install / cannot.
+    "installed" means READY (binary resolves AND the catalog's probe passes), not merely
+    on PATH — a present-but-broken linter is planned as "install"."""
     if tier == "none":
         return []
     plan = []
     for linter in [dict(item) for item in BUILTIN]:
         if not tier_covers(tier, linter["tier"]):
             continue
-        found = find_binary(linter["binary"])
-        if found:
-            plan.append((linter, "installed", found))
+        if linter_ready(linter, probe_runner):
+            plan.append((linter, "installed", find_binary(linter["binary"])))
         elif find_binary(linter["install"]["manager"]):
             plan.append((linter, "install", install_hint(linter)))
         else:
@@ -1014,13 +1058,13 @@ def cmd_setup(args):
         if status != "install":
             continue
         _run_install(linter["install"]["cmd"])
-        found = find_binary(linter["binary"])  # verify by outcome, not by exit code
-        if found:
-            print("  %-11s installed: %s" % (linter["id"], found))
+        # verify by outcome, not by exit code: ready = binary AND probe, not just on PATH
+        if linter_ready(linter):
+            print("  %-11s installed: %s" % (linter["id"], find_binary(linter["binary"])))
         else:
             print("  %-11s FAILED: %s" % (linter["id"], reason or
-                                          "the installer reported success but the binary is still "
-                                          "not on PATH"))
+                                          "the installer reported success but the linter is "
+                                          "still not functional (probe did not pass)"))
     record_tier(tier)
     print("tier recorded: %s (%s)" % (tier, config_home() / CONFIG_FILE))
     print('coverage applies from the next edit; "check-code.py doctor" shows what is installed')

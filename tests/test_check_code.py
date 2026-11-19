@@ -1143,7 +1143,8 @@ def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, cap
     assert rc == 0
     assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"],
                      ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
-                     ["brew", "install", "rubocop"], ["brew", "install", "typescript-language-server"],
+                     ["brew", "install", "rubocop"],
+                     ["brew", "install", "typescript-language-server", "typescript"],
                      ["brew", "install", "actionlint"]]
     assert _config() == {"tier": "polyglot"}
     assert "installed: /bin/actionlint" in out
@@ -1231,6 +1232,89 @@ def test_tier_summary_polyglot_covers_every_catalog_linter():
     for lin in cc.BUILTIN:
         assert cc.tier_covers("polyglot", lin["tier"])
         assert lin["id"] in cc._tier_summary("polyglot"), lin["id"]
+
+
+# ------------------------------------------- 0.5.0: functional probes (linter_ready)
+
+def _fake_linter(**over):
+    base = {"id": "fake", "language": "Fake", "binary": "fake-bin", "tier": "polyglot",
+            "install": {"manager": "brew", "cmd": ["brew", "install", "fake"]},
+            "ext": ["fake"], "shebang": None,
+            "command": lambda path: ["fake-bin", str(path)], "parse": lambda out: []}
+    base.update(over)
+    return base
+
+
+def test_typescript_lsp_entry_carries_probe_and_full_install():
+    entry = next(e for e in cc.BUILTIN if e["id"] == "typescript-lsp")
+    assert entry["install"]["cmd"] == ["brew", "install", "typescript-language-server", "typescript"]
+    assert entry["probe"]["expect_code"] == "2322"
+    fixture = Path(cc.__file__).resolve().parent.parent / entry["probe"]["fixture"]
+    assert fixture.is_file(), fixture
+
+
+def test_linter_ready_needs_the_binary(monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    assert cc.linter_ready(_fake_linter()) is False
+
+
+def test_linter_ready_without_probe_is_binary_only(monkeypatch):
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/fake/" + name)
+    assert cc.linter_ready(_fake_linter()) is True
+
+
+def test_linter_ready_runs_probe_only_when_binary_present(monkeypatch):
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    calls = []
+
+    def runner(l):
+        calls.append(l["id"])
+        return True, "ok"
+
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/fake/" + name)
+    assert cc.linter_ready(lin, probe_runner=runner) is True
+    assert calls == ["fake"]
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)
+    calls.clear()
+    assert cc.linter_ready(lin, probe_runner=runner) is False
+    assert calls == []          # no binary -> the probe never runs
+
+
+def test_linter_ready_broken_probe_is_not_ready(monkeypatch):
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    monkeypatch.setattr(cc, "find_binary", lambda name: "/fake/" + name)
+    assert cc.linter_ready(lin, probe_runner=lambda lin: (False, "noServer")) is False
+
+
+def test_setup_plan_plans_present_but_broken_linter_as_install(monkeypatch):
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    monkeypatch.setattr(cc, "find_binary",
+                        lambda name: "/fake/brew" if name == "brew" else "/fake/" + name)
+    plan = cc.setup_plan("polyglot", probe_runner=lambda lin: (False, "noServer"))
+    assert [(lin["id"], s) for lin, s, _ in plan] == [("fake", "install")]
+    assert plan[0][2] == "brew install fake"
+    plan = cc.setup_plan("polyglot", probe_runner=lambda lin: (True, "ok"))
+    assert [(lin["id"], s) for lin, s, _ in plan] == [("fake", "installed")]
+
+
+@pytest.mark.skipif(shutil.which("typescript-language-server") is None,
+                    reason="typescript-language-server not installed")
+def test_default_probe_runs_the_real_driver_on_the_fixture():
+    entry = next(e for e in cc.BUILTIN if e["id"] == "typescript-lsp")
+    ok, detail = cc._default_probe(entry)
+    assert ok, detail
+
+
+def test_default_probe_can_fail_when_the_code_is_absent(monkeypatch):
+    """Negative control for the probe itself: a command that reports NOTHING must make
+    the probe fail — otherwise 'probe passed' proves nothing (planted-positive rule)."""
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    lin["command"] = lambda path: ["true"]          # runs, prints nothing
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)   # cmd[0] stays "true"
+    ok, detail = cc._default_probe(lin)
+    assert ok is False
+    assert "2322" in detail
 
 
 # ---------------------------------------------------------------- setup CLI (real subprocess)
