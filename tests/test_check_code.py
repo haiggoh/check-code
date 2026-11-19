@@ -155,7 +155,9 @@ def test_missing_linter_is_one_quiet_notice_per_session_total(tmp_path, monkeypa
     f = tmp_path / "a.py"
     f.write_text("x = 1\n")
     first = hook(edit_payload(f, "x = 1", session="m"))[1]
-    assert "not linted" in first and '"check-code.py setup"' in first
+    # 0.5.0: the notice now says the auto-install happens at the next session start
+    assert "not linted" in first and "next session start" in first
+    assert '"setup"' in first and '"setup --tier none"' in first
     assert "pipx install ruff" not in first and "not installed" not in first
     assert hook(edit_payload(f, "x = 1", session="m"))[1] == ""
     assert "not linted" in hook(edit_payload(f, "x = 1", session="other"))[1]
@@ -926,7 +928,7 @@ def test_c3_notice_once_per_session_in_total(tmp_path, monkeypatch):
     f = tmp_path / "a.py"
     f.write_text("x = 1\n")
     first = hook(edit_payload(f, "x = 1", session="n"))[1]
-    assert ".py edits are not linted" in first and '"check-code.py setup"' in first
+    assert ".py edits are not linted" in first and "next session start" in first
     assert '"setup --tier none"' in first
     assert not first.startswith("🩻")   # 0.3.1: the notice stays unbranded (credit-moments rule)
     # once per session in TOTAL, not per language: a different language stays silent
@@ -1315,6 +1317,180 @@ def test_default_probe_can_fail_when_the_code_is_absent(monkeypatch):
     ok, detail = cc._default_probe(lin)
     assert ok is False
     assert "2322" in detail
+
+
+# ------------------------------------------- 0.5.0: sync (SessionStart auto-install)
+
+def _sync_clock(t):
+    return lambda: t
+
+
+def test_sync_spawns_one_worker_and_announces_the_installs(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    rc = cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                       find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert len(argvs) == 1 and argvs[0][-2:] == ["sync", "--worker"]
+    assert json.loads(out)["systemMessage"] == \
+        "🩻 check-code: installing fake for your polyglot tier in the background"
+    assert (home / "sync.lock").is_file()
+
+
+def test_sync_silent_when_everything_ready(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    rc = cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                       find_bin=lambda n: "/fake/" + n)
+    assert rc == 0 and argvs == [] and capsys.readouterr().out == ""
+
+
+def test_sync_tier_none_does_nothing(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    rc = cc._sync_main(home, "none", _sync_clock(1000.0), spawn=argvs.append,
+                       find_bin=lambda n: None)
+    assert rc == 0 and argvs == [] and capsys.readouterr().out == ""
+
+
+def test_sync_fresh_lock_blocks_second_spawn(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    (home / "sync.lock").write_text(json.dumps({"at": 990.0}))    # 10 s old: fresh
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    rc = cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                       find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    assert rc == 0 and argvs == [] and capsys.readouterr().out == ""
+
+
+def test_sync_stale_lock_is_broken_and_worker_spawns(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    (home / "sync.lock").write_text(json.dumps({"at": 1000.0 - 1801}))   # > 30 min
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    assert len(argvs) == 1
+    assert json.loads((home / "sync.lock").read_text())["at"] == 1000.0
+
+
+def test_worker_records_installed_and_failed_per_id(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    good = _fake_linter()                    # install cmd ends in "fake" = its id
+    bad = _fake_linter(id="bad", binary="bad-bin",
+                       install={"manager": "brew", "cmd": ["brew", "install", "broken-pkg"]})
+    monkeypatch.setattr(cc, "BUILTIN", [good, bad])
+    (home / "sync.lock").write_text(json.dumps({"at": 1.0}))
+    installed = set()
+
+    def run_install(cmd):
+        installed.add(cmd[-1])
+        return True, "ok"
+
+    def ready(lin):
+        return lin["id"] == "fake" and "fake" in installed   # bad never becomes ready
+
+    rc = cc._sync_worker(home, "polyglot", _sync_clock(5000.0), run_install, ready)
+    assert rc == 0
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state["results"]["fake"]["status"] == "installed"
+    assert not state["results"]["fake"]["reported"]
+    assert state["results"]["bad"]["status"] == "failed"
+    assert state["results"]["bad"]["cmd"] == "brew install broken-pkg"
+    assert not (home / "sync.lock").exists()   # worker releases the lock
+
+
+def test_worker_retries_failed_ids_only_after_24h(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter(id="fake2", binary="fake2-bin",
+                                                     install={"manager": "brew",
+                                                              "cmd": ["brew", "install", "fake2"]})])
+    (home / "sync-state.json").write_text(json.dumps({"results": {"fake2": {
+        "status": "failed", "reason": "boom", "cmd": "brew install fake2",
+        "at": 1000.0, "reported": True}}}))
+    calls = []
+
+    def run_install(cmd):
+        calls.append(list(cmd))
+        return True, "ok"
+
+    cc._sync_worker(home, "polyglot", _sync_clock(1000.0 + 3600), run_install,
+                    lambda lin: False)
+    assert calls == []                                  # 1 h old: not retried
+    cc._sync_worker(home, "polyglot", _sync_clock(1000.0 + 86401), run_install,
+                    lambda lin: False)
+    assert calls == [["brew", "install", "fake2"]]      # > 24 h: retried once
+
+
+def test_sync_reports_worker_results_once(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    (home / "sync-state.json").write_text(json.dumps({"results": {
+        "fake": {"status": "installed", "reason": "ok", "cmd": "brew install fake",
+                 "at": 1.0, "reported": False},
+        "bad": {"status": "failed", "reason": "boom", "cmd": "brew install bad",
+                "at": 1.0, "reported": False}}}))
+    monkeypatch.setattr(cc, "BUILTIN",
+                        [_fake_linter(), _fake_linter(id="bad", binary="bad-bin")])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(2000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/" + n)      # all present: no spawn
+    msg = json.loads(capsys.readouterr().out.strip())["systemMessage"]
+    assert argvs == []
+    assert "installed: fake" in msg
+    assert "could not install bad: boom — run: brew install bad" in msg
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state["results"]["fake"]["reported"] is True
+    cc._sync_main(home, "polyglot", _sync_clock(3000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/" + n)
+    assert capsys.readouterr().out == ""                # reported once, not per session
+
+
+def test_sync_without_a_package_manager_prints_the_command_once(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: None)              # no binary, no manager
+    msg = json.loads(capsys.readouterr().out.strip())["systemMessage"]
+    assert argvs == []
+    assert "brew install fake" in msg
+    cc._sync_main(home, "polyglot", _sync_clock(2000.0), spawn=argvs.append,
+                  find_bin=lambda n: None)
+    assert capsys.readouterr().out.strip() == ""        # once
+
+
+def test_hooks_json_runs_sync_on_session_start():
+    hooks = json.loads((Path(cc.__file__).resolve().parent.parent / "hooks" / "hooks.json")
+                       .read_text(encoding="utf-8"))
+    hook_cmds = [h for e in (hooks["hooks"].get("SessionStart") or [])
+                 for h in e.get("hooks", [])]
+    assert any(h.get("command") == 'python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" sync'
+               for h in hook_cmds)
+    assert all(h.get("timeout") == 5 for h in hook_cmds)   # the hook must never block
+
+
+def test_sync_help_documents_worker_flag_and_unknown_flag_exits_2():
+    r = cli("sync", "--help")
+    assert r.returncode == 0 and "--worker" in r.stdout
+    assert cli("sync", "--bogus").returncode == 2
+
+
+def test_coverage_notices_mention_the_automatic_install():
+    assert "next session start" in cc.COVERAGE_NOTICE_C3
+    assert "next session start" in cc.COVERAGE_NOTICE_C4
 
 
 # ---------------------------------------------------------------- setup CLI (real subprocess)

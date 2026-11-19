@@ -795,10 +795,11 @@ def _format_findings(findings, ranges, path):
     return "\n".join(lines)
 
 
-COVERAGE_NOTICE_C3 = ('check-code: %s edits are not linted — run "check-code.py setup" once '
-                      'to choose coverage (or "setup --tier none" to silence this).')
-COVERAGE_NOTICE_C4 = ('check-code: %s is missing but your "%s" tier includes it — run '
-                      '"check-code.py setup".')
+COVERAGE_NOTICE_C3 = ('check-code: %s edits are not linted — missing linters install '
+                      'automatically at the next session start ("setup" picks a tier now, '
+                      '"setup --tier none" silences this).')
+COVERAGE_NOTICE_C4 = ('check-code: %s is missing but your "%s" tier includes it — it installs '
+                      'automatically at the next session start ("setup" can do it now).')
 
 
 def _coverage_notice(path, candidates, recorded, session_id):
@@ -1071,6 +1072,152 @@ def cmd_setup(args):
     return 0
 
 
+# ---------------------------------------------------------------- sync (SessionStart)
+# The install path for people who never ran setup: at every session start this prints
+# nothing (fast, < 1 s, never blocks) unless a previous background worker has results to
+# report (once) or the fast binary check finds tier linters missing — then it spawns ONE
+# detached worker and goes quiet. The worker (never the hook) probes and installs.
+# 0.5.0: the flaw this fixes — only `setup` installed anything, so an update that added a
+# linter (typescript-lsp in 0.4.6) silently left it uninstalled until the user noticed.
+
+SYNC_LOCK_TTL = 1800           # a worker dead > 30 min no longer holds sync.lock
+SYNC_RETRY_AFTER = 24 * 3600   # a failed install is retried at most once per day
+SYNC_STATE_FILE = "sync-state.json"
+SYNC_LOCK = "sync.lock"
+
+
+def _system_message(text):
+    """One line of SessionStart hook JSON; ensure_ascii keeps 🩻 and — human-readable."""
+    print(json.dumps({"systemMessage": text}, ensure_ascii=False), flush=True)
+
+
+def _load_sync_state(home):
+    return _load_json(home / SYNC_STATE_FILE, {"results": {}, "manager_notice": False})
+
+
+def _save_sync_state(home, state):
+    home.mkdir(parents=True, exist_ok=True)
+    (home / SYNC_STATE_FILE).write_text(json.dumps(state, indent=1) + "\n", encoding="utf-8")
+
+
+def _release_lock(lock):
+    try:
+        lock.unlink()
+    except OSError:
+        pass
+
+
+def _sync_main(home, tier, clock, spawn, find_bin):
+    """Fast session-start check. clock/spawn/find_bin injectable so tests never spawn,
+    probe, or touch the real PATH. Hook fail-open: any error -> exit 0, no output."""
+    try:
+        return _sync_main_run(home, tier, clock, spawn, find_bin)
+    except Exception:
+        return 0
+
+
+def _sync_main_run(home, tier, clock, spawn, find_bin):
+    if tier == "none":
+        return 0
+    state = _load_sync_state(home)
+    pending = [(lid, res) for lid, res in sorted(state.get("results", {}).items())
+               if not res.get("reported")]
+    if pending:
+        ok_ids = [lid for lid, res in pending if res.get("status") == "installed"]
+        parts = (["installed: " + ", ".join(ok_ids)] if ok_ids else []) + \
+                ["could not install %s: %s — run: %s"
+                 % (lid, res.get("reason") or "?", res.get("cmd") or "?")
+                 for lid, res in pending if res.get("status") != "installed"]
+        _system_message("🩻 check-code: " + "; ".join(parts))
+        for _lid, res in pending:
+            res["reported"] = True
+        _save_sync_state(home, state)
+    missing = [lin for lin in BUILTIN
+               if tier_covers(tier, lin["tier"]) and not find_bin(lin["binary"])]
+    if not missing:
+        return 0
+    spawnable = [lin for lin in missing if find_bin(lin["install"]["manager"])]
+    manual = [lin for lin in missing if not find_bin(lin["install"]["manager"])]
+    if manual and not state.get("manager_notice"):
+        _system_message("🩻 check-code: no %s here — run yourself: %s" % (
+            " or ".join(sorted({lin["install"]["manager"] for lin in manual})),
+            "; ".join(install_hint(lin) for lin in manual)))
+        state["manager_notice"] = True
+        _save_sync_state(home, state)
+    if not spawnable:
+        return 0
+    lock = home / SYNC_LOCK
+    if lock.is_file():
+        if clock() - _load_json(lock, {}).get("at", 0) < SYNC_LOCK_TTL:
+            return 0                     # another session's worker is already installing
+        _release_lock(lock)              # stale: a worker died > 30 min ago
+    home.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except OSError:
+        return 0                         # lost the race — exactly one worker, ever
+    with os.fdopen(fd, "w") as fh:
+        fh.write(json.dumps({"at": clock(), "pid": os.getpid()}))
+    spawn([sys.executable, str(Path(__file__).resolve()), "sync", "--worker"])
+    _system_message("🩻 check-code: installing %s for your %s tier in the background"
+                    % (", ".join(lin["id"] for lin in spawnable), tier))
+    return 0
+
+
+def _sync_worker(home, tier, clock, run_install, ready):
+    """The detached installer. Re-checks the WHOLE tier with readiness (probe included, so
+    a present-but-broken linter counts as not installed), installs what is missing,
+    records installed/failed per id for the next sync to report, releases the lock.
+    Never prints to the hook; never raises out."""
+    try:
+        _sync_worker_run(home, tier, clock, run_install, ready)
+        return 0
+    except Exception:
+        return 0
+    finally:
+        _release_lock(home / SYNC_LOCK)
+
+
+def _sync_worker_run(home, tier, clock, run_install, ready):
+    if tier == "none":
+        return
+    state = _load_sync_state(home)
+    now = clock()
+    for lin in [dict(item) for item in BUILTIN]:
+        if not tier_covers(tier, lin["tier"]):
+            continue
+        lid = lin["id"]
+        prev = (state.get("results") or {}).get(lid) or {}
+        if prev.get("status") == "failed" and now - prev.get("at", 0) < SYNC_RETRY_AFTER:
+            continue                     # a broken installer must not loop every session
+        if ready(lin):
+            continue                     # probe says it works — nothing to do
+        ok, reason = run_install(lin["install"]["cmd"])
+        state.setdefault("results", {})[lid] = {
+            "status": "installed" if ready(lin) else "failed",
+            "reason": reason if (ok and ready(lin)) else (reason or "install did not make "
+                                                           "the linter ready (probe failed)"),
+            "cmd": install_hint(lin), "at": now, "reported": False}
+        _save_sync_state(home, state)
+
+
+def _spawn(argv):
+    """Detached worker: own session, stdin devnull, output to sync.log — the hook that
+    spawned us returns in < 1 s no matter how long the install takes."""
+    home = config_home()
+    home.mkdir(parents=True, exist_ok=True)
+    with open(home / "sync.log", "ab") as log:
+        subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                         start_new_session=True)
+
+
+def cmd_sync(args):
+    tier = recorded_tier() or DEFAULT_TIER   # absent config = the opt-out default
+    if getattr(args, "worker", False):
+        return _sync_worker(config_home(), tier, time.time, _run_install, linter_ready)
+    return _sync_main(config_home(), tier, time.time, _spawn, find_binary)
+
+
 # ---------------------------------------------------------------- CLI
 
 def cmd_check(args):
@@ -1160,13 +1307,19 @@ def main(argv=None):
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--dry-run", action="store_true",
                    help="print the plan and change nothing")
+    y = sub.add_parser("sync", help="SessionStart entry: install missing tier linters in the "
+                                    "background (never blocks)")
+    y.add_argument("--worker", action="store_true",
+                   help="internal: the detached installer sync spawns — re-checks the whole "
+                        "tier with probes and records results")
     args = parser.parse_args(argv)
     if args.cmd is None:
         parser.print_help(sys.stderr)
         return 2
     if args.cmd == "hook":
         return run_hook(sys.stdin)
-    return {"check": cmd_check, "doctor": cmd_doctor, "setup": cmd_setup}[args.cmd](args)
+    return {"check": cmd_check, "doctor": cmd_doctor, "setup": cmd_setup,
+            "sync": cmd_sync}[args.cmd](args)
 
 
 if __name__ == "__main__":
