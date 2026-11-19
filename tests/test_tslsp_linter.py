@@ -54,3 +54,45 @@ def test_runner_end_to_end_on_a_real_file(tmp_path):
     msg = json.loads(r.stdout.strip().splitlines()[-1])
     diags = msg["params"]["diagnostics"]
     assert any(d["code"] == 2322 and d["range"]["start"]["line"] == 0 for d in diags)
+
+
+# ---- 0.5.0: languageId by extension, project root for tsconfig discovery ----------------
+_rspec = importlib.util.spec_from_file_location("tslsp_lint", RUNNER)
+assert _rspec is not None and _rspec.loader is not None
+tslsp = importlib.util.module_from_spec(_rspec)
+_rspec.loader.exec_module(tslsp)
+
+
+@pytest.mark.parametrize("name,expected", [
+    ("a.tsx", "typescriptreact"), ("a.jsx", "javascriptreact"),
+    ("a.js", "javascript"), ("a.mjs", "javascript"), ("a.cjs", "javascript"),
+    ("a.ts", "typescript"), ("a.mts", "typescript"), ("a.cts", "typescript"),
+])
+def test_language_id_follows_the_extension(name, expected):
+    assert tslsp._language_id(name) == expected
+
+
+def test_project_root_is_the_nearest_folder_with_a_ts_config(tmp_path):
+    (tmp_path / "proj" / "hooks" / "deep").mkdir(parents=True)
+    (tmp_path / "proj" / "tsconfig.json").write_text("{}")
+    f = tmp_path / "proj" / "hooks" / "deep" / "x.tsx"
+    f.write_text("")
+    assert tslsp._project_root(str(f)) == str(tmp_path / "proj")
+
+
+def test_project_root_falls_back_to_the_files_folder(tmp_path):
+    f = tmp_path / "lonely.ts"
+    f.write_text("")
+    # tmp_path has no tsconfig/jsconfig/package.json and is not a git checkout
+    assert tslsp._project_root(str(f)) == str(tmp_path)
+
+
+@pytest.mark.skipif(shutil.which("typescript-language-server") is None,
+                    reason="typescript-language-server not installed")
+def test_tsx_in_a_project_reports_only_the_planted_error():
+    f = os.path.join(FIXTURES, "tsx_project", "src", "view.tsx")
+    r = subprocess.run(["python3", RUNNER, f], capture_output=True, text=True, timeout=90)
+    assert r.returncode == 0, r.stderr
+    codes = [str(d.get("code")) for line in r.stdout.splitlines() if line.strip()
+             for d in json.loads(line)["params"]["diagnostics"]]
+    assert codes == ["2322"], codes
