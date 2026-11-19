@@ -791,10 +791,10 @@ def test_rubocop_parser_reads_real_fixture():
 def test_catalog_dispatch_new_languages(tmp_path):
     linters = cc.load_linters()
     ids = lambda p: [lin["id"] for lin in cc.linters_for(p, linters)]  # noqa: E731
-    assert ids(tmp_path / "a.ts") == ["biome"]
-    assert ids(tmp_path / "a.tsx") == ["biome"]
-    assert ids(tmp_path / "a.js") == ["biome"]
-    assert ids(tmp_path / "a.jsx") == ["biome"]
+    assert ids(tmp_path / "a.ts") == ["biome", "typescript-lsp"]
+    assert ids(tmp_path / "a.tsx") == ["biome", "typescript-lsp"]
+    assert ids(tmp_path / "a.js") == ["biome", "typescript-lsp"]
+    assert ids(tmp_path / "a.jsx") == ["biome", "typescript-lsp"]
     assert ids(tmp_path / "a.swift") == ["swiftlint"]
     assert ids(tmp_path / "a.rb") == ["rubocop"]
     assert ids(tmp_path / "a.json") == []       # no catalog entry claims json (notice rule C1)
@@ -1143,7 +1143,8 @@ def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, cap
     assert rc == 0
     assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"],
                      ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
-                     ["brew", "install", "rubocop"], ["brew", "install", "actionlint"]]
+                     ["brew", "install", "rubocop"], ["brew", "install", "typescript-language-server"],
+                     ["brew", "install", "actionlint"]]
     assert _config() == {"tier": "polyglot"}
     assert "installed: /bin/actionlint" in out
 

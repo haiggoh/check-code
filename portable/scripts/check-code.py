@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.4.5"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.6"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -208,6 +208,42 @@ def _biome_parse(stdout):
     return out
 
 
+def _tslsp_parse(stdout):
+    """Parse typescript-language-server publishDiagnostics JSON lines (one per notification).
+
+    Each diagnostic: range.start.line is 0-based -> +1; severity 1=error 2=warning (3/4 pass
+    through as lint); code is the ts error code, used as the rule name."""
+    out = []
+    for line in (stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if msg.get("method") != "textDocument/publishDiagnostics":
+            continue
+        for d in (msg.get("params") or {}).get("diagnostics") or []:
+            start = ((d.get("range") or {}).get("start") or {})
+            out.append((int(start.get("line") or 0) + 1,
+                        str(d.get("code") or "ts"),
+                        (d.get("message") or "").splitlines()[0] if d.get("message") else ""))
+    return out
+
+
+def _tslsp_command(path):
+    """Drive typescript-language-server over stdio for ONE file's diagnostics.
+
+    The server speaks LSP (Content-Length framed); the runner in scripts/tslsp-lint.py does the
+    framing and prints one publishDiagnostics JSON per line, which _tslsp_parse reads."""
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / "scripts" / "tslsp-lint.py", here / "scripts" / "tslsp-lint.py"):
+        if cand.is_file():
+            return ["python3", str(cand), str(path)]
+    return ["python3", "-c", "import sys; sys.exit(2)", str(path)]  # runner missing: loud, not silent
+
+
 def _rubocop_parse(stdout):
     """Parse rubocop's --lint --format json: the code is cop_name; the message
     repeats the cop as a prefix, which is stripped."""
@@ -252,6 +288,11 @@ BUILTIN = [
      # --lint = the Lint department: the pinned conservative error-cop set, as ruff is pinned.
      "command": lambda path: ["rubocop", "--lint", "--format", "json", str(path)],
      "parse": _rubocop_parse},
+    {"id": "typescript-lsp", "language": "TS (LSP)", "binary": "typescript-language-server",
+     "tier": "polyglot",
+     "install": {"manager": "brew", "cmd": ["brew", "install", "typescript-language-server"]},
+     "ext": ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"], "shebang": None,
+     "command": _tslsp_command, "parse": _tslsp_parse},
     {"id": "actionlint", "language": "Actions", "binary": "actionlint", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "actionlint"]},
      "ext": [], "shebang": None,

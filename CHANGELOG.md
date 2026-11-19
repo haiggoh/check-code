@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.6] — 2026-11-19
+
+### Added — `typescript-lsp` built-in linter (polyglot tier)
+- New catalog entry driving `typescript-language-server` over stdio via `scripts/tslsp-lint.py`: one `publishDiagnostics` JSON per file, parsed by `_tslsp_parse` (0-based LSP lines → 1-based, ts code as rule name). Covers ts/tsx/js/jsx/mts/cts/mjs/cjs; install hint `brew install typescript-language-server`.
+- Measured gotcha baked in: the brew typescript-language-server package ships only `cli.mjs`; its `typescript` dependency can be a stub (lib/ without `typescript.js`), which makes tsserver never start and every `tsserverRequest` answer `{"type":"noServer"}`. The runner therefore (a) locates a COMPLETE typescript lib (env `CHECK_CODE_TSSERVER_LIB`, then intelephense's bundled copy, then global) and sets `tsserver.path`, and (b) uses `semanticDiagnosticsSync` via `workspace/executeCommand` as the reliable path (publishDiagnostics stayed silent in probes). Verified live: a real type error is reported end-to-end (rc 0, code 2322).
+- Tests: parser fixture, catalog dispatch (ts/tsx/js/jsx now also match typescript-lsp), tier/install data, end-to-end runner test (skipped when the server is absent). Suite: 137 passed.
+
 ## [0.4.5] — 2026-11-14
 
 ### Added — Phase 2: committed portable package (COORDINATION C1/C2)
