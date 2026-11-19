@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.7] — 2026-11-19
+
+### Fixed — LSP linters get their own per-run timeout (LSP_TIMEOUT=60s); typescript-lsp no longer crashes check on a one-line file (TimeoutExpired after 10s, measured). 3 tests pin the split.
+
 ## [0.4.6] — 2026-11-19
 
 ### Added — `typescript-lsp` built-in linter (polyglot tier)

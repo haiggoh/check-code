@@ -19,10 +19,11 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.4.6"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.4.7"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
+LSP_TIMEOUT = 60        # LSP servers start a project-wide tsserver first; 10s is too short (2026-11-19: typescript-lsp timed out on a one-line file)
 STATE_TTL = 2 * 86400
 EXTRA_PATH = ["/opt/homebrew/bin", "/usr/local/bin", "~/.local/bin", "~/.cargo/bin"]
 
@@ -366,7 +367,8 @@ def run_linter(linter, path):
     """Return [(line, code, message)]; raises on timeout or unparseable output."""
     cmd = linter["command"](path)
     cmd[0] = find_binary(cmd[0]) or cmd[0]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=LINT_TIMEOUT,
+    timeout = LSP_TIMEOUT if "lsp" in linter["id"] else LINT_TIMEOUT
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
                           cwd=str(path.parent))
     return linter["parse"](proc.stdout)
 
