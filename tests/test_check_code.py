@@ -1340,6 +1340,27 @@ def test_sync_spawns_one_worker_and_announces_the_installs(tmp_path, monkeypatch
     assert (home / "sync.lock").is_file()
 
 
+def test_sync_fresh_user_many_missing_spawn_one_worker_naming_all(tmp_path, monkeypatch, capsys):
+    """The design target: a user who just installed the plugin has MOST linters missing.
+    They get ONE worker for all of them and ONE message, never per-linter spam."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [
+        _fake_linter(),
+        _fake_linter(id="b2", binary="b2-bin"),
+        _fake_linter(id="c3", binary="c3-bin",
+                     install={"manager": "pipx", "cmd": ["pipx", "install", "c3"]}),
+    ])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/brew" if n == "brew"
+                  else "/fake/pipx" if n == "pipx" else None)
+    out = capsys.readouterr().out.strip()
+    assert len(argvs) == 1
+    assert json.loads(out)["systemMessage"] == \
+        "🩻 check-code: installing fake, b2, c3 for your polyglot tier in the background"
+
+
 def test_sync_silent_when_everything_ready(tmp_path, monkeypatch, capsys):
     home = tmp_path / "sync-home"
     home.mkdir()
