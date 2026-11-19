@@ -15,19 +15,65 @@ import sys
 import time
 
 
+# LSP languageId per file extension: tsserver cannot tell a TSX generic from a
+# JSX element otherwise (it parses `<Text dimColor>` as two comparisons).
+_LANGUAGE_IDS = {
+    ".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
+    ".tsx": "typescriptreact",
+    ".js": "javascript", ".mjs": "javascript", ".cjs": "javascript",
+    ".jsx": "javascriptreact",
+}
+_LANGUAGE_ID_DEFAULT = "typescript"
+
+# A project's config files, nearest first: tsserver reads `jsx`, `jsxFactory`,
+# `lib` and `types` from them, so the root must be the project, not a scratch dir.
+_PROJECT_MARKERS = ("tsconfig.json", "jsconfig.json", "package.json")
+
+
+def _language_id(path):
+    """The LSP languageId for a file, by extension (case-insensitive)."""
+    return _LANGUAGE_IDS.get(os.path.splitext(path)[1].lower(), _LANGUAGE_ID_DEFAULT)
+
+
+def _project_root(path):
+    """Nearest ancestor directory holding a tsconfig/jsconfig/package.json;
+    failing that, the git top level; failing that, the file's own directory."""
+    path = os.path.abspath(path)
+    nearest = path if os.path.isdir(path) else os.path.dirname(path)
+    current = nearest
+    while True:
+        if any(os.path.isfile(os.path.join(current, m)) for m in _PROJECT_MARKERS):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+    try:
+        top = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=nearest,
+                             capture_output=True, text=True, timeout=15)
+    except Exception:
+        return nearest
+    if top.returncode == 0 and top.stdout.strip():
+        return os.path.abspath(top.stdout.strip())
+    return nearest
+
+
 def _tsserver_lib():
     """A directory containing a COMPLETE typescript lib (tsserver.js + typescript.js).
 
     The brew typescript-language-server package ships only cli.mjs; its sibling typescript
     package can be a stub (lib/ with just tsc.js), which makes tsserver never start (every
     tsserverRequest answers {"type":"noServer"}). Find a complete lib: env override first,
-    then common locations (intelephense's bundled typescript, the global typescript)."""
+    then common locations (intelephense's bundled typescript, the global typescript,
+    brew's typescript under its `opt` path, which is what a fresh install gets)."""
     env_dir = os.environ.get("CHECK_CODE_TSSERVER_LIB")
     candidates = [env_dir] if env_dir else []
     candidates += [
         "/opt/homebrew/lib/node_modules/intelephense/node_modules/typescript/lib",
         "/opt/homebrew/lib/node_modules/typescript/lib",
+        "/opt/homebrew/opt/typescript/libexec/lib/node_modules/typescript/lib",
         "/usr/local/lib/node_modules/typescript/lib",
+        "/usr/local/opt/typescript/libexec/lib/node_modules/typescript/lib",
     ]
     for d in candidates:
         if d and os.path.isfile(os.path.join(d, "tsserver.js")) and os.path.isfile(os.path.join(d, "typescript.js")):
@@ -41,7 +87,7 @@ def main():
     a = ap.parse_args()
     path = os.path.abspath(a.file)
     uri = "file://" + path
-    root = "file://" + os.path.dirname(path)
+    root = "file://" + _project_root(path)
     server = "typescript-language-server"
     lib = _tsserver_lib()
     init_opts = {"tsserver": {"path": lib}} if lib else {}
@@ -82,7 +128,7 @@ def main():
     with open(path, encoding="utf-8", errors="replace") as fh:
         text = fh.read()
     send({"jsonrpc": "2.0", "method": "textDocument/didOpen", "params": {
-        "textDocument": {"uri": uri, "languageId": "typescript", "version": 1, "text": text}}})
+        "textDocument": {"uri": uri, "languageId": _language_id(path), "version": 1, "text": text}}})
     # publishDiagnostics is unreliable on some installs (noServer without a complete
     # typescript lib); semanticDiagnosticsSync via tsserverRequest is the reliable path.
     send({"jsonrpc": "2.0", "id": 2, "method": "workspace/executeCommand", "params": {
