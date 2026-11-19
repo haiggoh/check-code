@@ -10,6 +10,7 @@ to scripts/ — no stale bin/ reference may survive in portable/.
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -98,6 +99,8 @@ def test_portable_build_json_matches_c2_schema():
     for k in ("source_repo", "source_commit", "builder", "builder_version",
               "transform_version", "files", "components"):
         assert k in d, f"PORTABLE-BUILD.json missing {k}"
+
+
     assert re.fullmatch(r"[0-9a-f]{40,64}", d["source_commit"])
     assert d["source_repo"].endswith("/check-code"), d["source_repo"]
     expected = {str(p.relative_to(PORTABLE)).replace("\\", "/") for p in PORTABLE.rglob("*")
@@ -113,6 +116,36 @@ def test_portable_build_json_matches_c2_schema():
         assert set(c["surfaces"]) == {"chat", "cowork", "code"}, c
         assert all(isinstance(v, bool) for v in c["surfaces"].values()), c
         assert (PORTABLE / c["path"]).exists(), c["path"]
+
+
+def test_portable_ships_the_lsp_driver_and_its_probe_fixture():
+    """0.5.0 (review Critical 2): the CLI has __file__-relative resources — the tslsp driver
+    and the probe fixture. The portable move put check-code.py at scripts/, so they must ship
+    at portable/scripts/ too, or typescript-lsp (a) cannot run and (b) fails its probe
+    forever, and the 24h-retry worker would reinstall it daily without fixing anything."""
+    assert (PORTABLE / "scripts" / "tslsp-lint.py").is_file(), "driver missing in portable/"
+    assert (PORTABLE / "scripts" / "probe" / "bad.ts").is_file(), "probe fixture missing in portable/"
+
+
+@pytest.mark.skipif(shutil.which("typescript-language-server") is None,
+                    reason="typescript-language-server not installed")
+def test_portable_copy_probes_typescript_lsp_end_to_end():
+    """Delivery level: the PORTABLE copy's probe must pass against the real server — it runs
+    the driver found through the portable layout (scripts/tslsp-lint.py), on the fixture
+    found through it too (scripts/probe/bad.ts)."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("cc_portable",
+                                                  PORTABLE / "scripts" / "check-code.py")
+    mod = importlib.util.module_from_spec(spec)
+    prev = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True          # portable/ is committed: no __pycache__ in it
+    try:
+        spec.loader.exec_module(mod)
+    finally:
+        sys.dont_write_bytecode = prev
+    entry = next(e for e in mod.BUILTIN if e["id"] == "typescript-lsp")
+    ok, detail = mod._default_probe(entry)
+    assert ok, detail
 
 
 def test_zip_is_deterministic_manifest_at_root_and_side_effect_free(tmp_path):

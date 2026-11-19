@@ -434,14 +434,38 @@ def run_linter(linter, path):
     return linter["parse"](proc.stdout)
 
 
+# Fallback probe source when an install shipped the CLI alone (no scripts/ tree): the probe
+# must stay runnable instead of failing forever. tests pin this to scripts/probe/bad.ts.
+PROBE_FALLBACK_SOURCE = "export const planted: number = 'not a number'\n"
+
+
+def _probe_fixture_path(rel):
+    """The packaged probe fixture in either layout (plugin install: CLI under the plugin's
+    bin/ with scripts/ at its root; portable install: CLI under scripts/ with the same
+    scripts/ beside it). If neither exists (CLI installed alone), write the fallback to a
+    temp file — a probe that cannot run must never masquerade as a passing one."""
+    here = Path(__file__).resolve().parent
+    for cand in (here.parent / rel, here / rel):
+        if cand.is_file():
+            return cand
+    try:
+        Path(tempfile.gettempdir()).mkdir(parents=True, exist_ok=True)
+        tmpdir = Path(tempfile.mkdtemp(prefix="check-code-probe-"))
+        path = tmpdir / Path(rel).name
+        path.write_text(PROBE_FALLBACK_SOURCE, encoding="utf-8")
+        return path
+    except OSError:
+        return None                      # probe must fail closed, never crash the caller
+
+
 def _default_probe(linter):
     """The real functional probe: run the linter's own command on the catalog's probe
     fixture and require the expected code in the parsed findings. Returns (ok, detail).
     This is what separates a WORKING linter from a present-but-broken one."""
     probe = linter.get("probe") or {}
-    fixture = (Path(__file__).resolve().parent.parent / str(probe.get("fixture") or "")).resolve()
-    if not fixture.is_file():
-        return False, "probe fixture missing: %s" % fixture
+    fixture = _probe_fixture_path(str(probe.get("fixture") or "scripts/probe/bad.ts"))
+    if fixture is None:
+        return False, "probe fixture unavailable (no packaged fixture, no writable temp dir)"
     cmd = linter["command"](fixture)
     cmd[0] = find_binary(cmd[0]) or cmd[0]
     timeout = LSP_TIMEOUT if "lsp" in linter["id"] else LINT_TIMEOUT
@@ -1082,6 +1106,7 @@ def cmd_setup(args):
 
 SYNC_LOCK_TTL = 1800           # a worker dead > 30 min no longer holds sync.lock
 SYNC_RETRY_AFTER = 24 * 3600   # a failed install is retried at most once per day
+PROBE_INTERVAL = 24 * 3600   # a PRESENT-but-broken linter is re-probed at most daily
 SYNC_STATE_FILE = "sync-state.json"
 SYNC_LOCK = "sync.lock"
 
@@ -1105,6 +1130,21 @@ def _release_lock(lock):
         lock.unlink()
     except OSError:
         pass
+
+
+def _lock_held(lock, clock):
+    """Is the lock held right now? The winner's own timestamp is authoritative when the JSON
+    is readable; when it is not (the O_EXCL create makes the file exist before its JSON is
+    written — a real TOCTOU window the pre-ship review found) fall back to the file's mtime,
+    so an empty-but-just-created lock still blocks. Content wins when present: a stale
+    timestamp with a fresh mtime means the worker died > 30 min ago."""
+    at = _load_json(lock, {}).get("at")
+    if isinstance(at, (int, float)):
+        return clock() - at < SYNC_LOCK_TTL
+    try:
+        return time.time() - lock.stat().st_mtime < SYNC_LOCK_TTL
+    except OSError:
+        return True                     # exists but unreadable: assume held
 
 
 def _sync_main(home, tier, clock, spawn, find_bin):
@@ -1134,10 +1174,21 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
         _save_sync_state(home, state)
     missing = [lin for lin in BUILTIN
                if tier_covers(tier, lin["tier"]) and not find_bin(lin["binary"])]
-    if not missing:
+    # A PRESENT binary is only trusted when the worker's cached probe verdict is fresh:
+    # present-but-broken (stub typescript lib -> noServer) is the exact silent failure
+    # this release exists to kill. Probing here would be too slow, so the worker probes
+    # and caches the verdict, and sync re-spawns at most once per PROBE_INTERVAL.
+    probes = state.get("probes") or {}
+    due = [lin for lin in BUILTIN
+           if tier_covers(tier, lin["tier"]) and "probe" in lin and find_bin(lin["binary"])
+           and not (isinstance(probes.get(lin["id"]), dict)
+                    and clock() - probes[lin["id"]].get("at", 0) < PROBE_INTERVAL)]
+    due = [lin for lin in due if lin["id"] not in {m["id"] for m in missing}]
+    if not missing and not due:
         return 0
-    spawnable = [lin for lin in missing if find_bin(lin["install"]["manager"])]
-    manual = [lin for lin in missing if not find_bin(lin["install"]["manager"])]
+    work = missing + due
+    spawnable = [lin for lin in work if find_bin(lin["install"]["manager"])]
+    manual = [lin for lin in work if not find_bin(lin["install"]["manager"])]
     if manual and not state.get("manager_notice"):
         _system_message("🩻 check-code: no %s here — run yourself: %s" % (
             " or ".join(sorted({lin["install"]["manager"] for lin in manual})),
@@ -1148,8 +1199,8 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
         return 0
     lock = home / SYNC_LOCK
     if lock.is_file():
-        if clock() - _load_json(lock, {}).get("at", 0) < SYNC_LOCK_TTL:
-            return 0                     # another session's worker is already installing
+        if _lock_held(lock, clock):
+            return 0                     # another session's worker is already at work
         _release_lock(lock)              # stale: a worker died > 30 min ago
     home.mkdir(parents=True, exist_ok=True)
     try:
@@ -1158,9 +1209,15 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
         return 0                         # lost the race — exactly one worker, ever
     with os.fdopen(fd, "w") as fh:
         fh.write(json.dumps({"at": clock(), "pid": os.getpid()}))
+    if state.get("manager_notice"):
+        state["manager_notice"] = False   # the manager is back: a later no-manager state may say so again
+        _save_sync_state(home, state)
     spawn([sys.executable, str(Path(__file__).resolve()), "sync", "--worker"])
-    _system_message("🩻 check-code: installing %s for your %s tier in the background"
-                    % (", ".join(lin["id"] for lin in spawnable), tier))
+    installing = [lin for lin in spawnable if lin["id"] in {m["id"] for m in missing}]
+    ids = [lin["id"] for lin in (installing or spawnable)]
+    verb = "installing %s for your %s tier" % (", ".join(ids), tier) if installing \
+        else "verifying %s" % ", ".join(ids)
+    _system_message("🩻 check-code: %s in the background" % verb)
     return 0
 
 
@@ -1187,16 +1244,22 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
         if not tier_covers(tier, lin["tier"]):
             continue
         lid = lin["id"]
+        ok_ready = ready(lin)
+        # every verdict is cached, so the fast main sync can trust "present" without probing
+        state.setdefault("probes", {})[lid] = {"ok": ok_ready, "at": now}
+        _save_sync_state(home, state)
+        if ok_ready:
+            continue                     # probe says it works — nothing to do
         prev = (state.get("results") or {}).get(lid) or {}
         if prev.get("status") == "failed" and now - prev.get("at", 0) < SYNC_RETRY_AFTER:
             continue                     # a broken installer must not loop every session
-        if ready(lin):
-            continue                     # probe says it works — nothing to do
         ok, reason = run_install(lin["install"]["cmd"])
+        ok_ready = ready(lin)            # verify by outcome: probe decides, not the exit code
+        state["probes"][lid] = {"ok": ok_ready, "at": now}
         state.setdefault("results", {})[lid] = {
-            "status": "installed" if ready(lin) else "failed",
-            "reason": reason if (ok and ready(lin)) else (reason or "install did not make "
-                                                           "the linter ready (probe failed)"),
+            "status": "installed" if ok_ready else "failed",
+            "reason": reason if (ok and ok_ready) else (reason or "install did not make "
+                                                         "the linter ready (probe failed)"),
             "cmd": install_hint(lin), "at": now, "reported": False}
         _save_sync_state(home, state)
 

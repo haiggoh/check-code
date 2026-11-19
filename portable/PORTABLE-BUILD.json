@@ -42,8 +42,32 @@
       "adaptation_class": "mechanical",
       "evidence_level": "source-inspected",
       "kind": "hook-script",
-      "notes": "moved bin/ -> scripts/ per C1 (top-level bin blocks Chat/Cowork installs); self-contained stdlib script, no __file__-relative resources; hook entry point",
+      "notes": "moved bin/ -> scripts/ per C1 (top-level bin blocks Chat/Cowork installs); stdlib script; its __file__-relative resources (tslsp-lint.py, probe/bad.ts) ship beside it \u2014 0.4.6 added them without extending this list",
       "path": "scripts/check-code.py",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "native-unchanged",
+      "evidence_level": "fixture-tested",
+      "kind": "hook-script",
+      "notes": "copied verbatim; the LSP stdio driver the CLI spawns for typescript-lsp",
+      "path": "scripts/tslsp-lint.py",
+      "surfaces": {
+        "chat": false,
+        "code": true,
+        "cowork": true
+      }
+    },
+    {
+      "adaptation_class": "native-unchanged",
+      "evidence_level": "fixture-tested",
+      "kind": "fixture",
+      "notes": "copied verbatim; one planted TS2322 \u2014 the functional probe's input",
+      "path": "scripts/probe/bad.ts",
       "surfaces": {
         "chat": false,
         "code": true,
@@ -54,11 +78,13 @@
   "files": {
     ".claude-plugin/plugin.json": "10e99927381030961c31336f5b9af042c0e57672acb9c757020b228f58f56085",
     "hooks/hooks.json": "71970c98eb3f5e379b8ef4b63ead7cda896c23d03aae6f6b5c7005c9afee032a",
-    "scripts/check-code.py": "ec34414f733a3456e8d1159ff1b0c22d92f4df1379920310bc771a76f427d4aa",
+    "scripts/check-code.py": "34954a45d0e8fc21f4baa253706df839a7a3f83393d290e8262175baba521709",
+    "scripts/probe/bad.ts": "3627cf2be833dec13811eeb86adfc50c78fdb1179de4d421686237d8ca087b57",
+    "scripts/tslsp-lint.py": "2ef99daa1221ce759f518308511fadf5dd513339d8b3c05b91aba7f5fc6aa87a",
     "skills/check-code/SKILL.md": "11f60fd31e9c617150f26be1e4e98512cb7e1fd73e5ea0444b6edf06fb5d8ad3"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "b1345e00b3f10cf960592f1155cd46c3023314ad",
+  "source_commit": "94fdf70c8f54f5353617a3ea4e77db7b6ab834d7",
   "source_repo": "haiggoh/check-code",
   "transform_version": "1"
 }

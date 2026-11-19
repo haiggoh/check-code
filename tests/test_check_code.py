@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -1395,13 +1396,113 @@ def test_sync_fresh_lock_blocks_second_spawn(tmp_path, monkeypatch, capsys):
 def test_sync_stale_lock_is_broken_and_worker_spawns(tmp_path, monkeypatch):
     home = tmp_path / "sync-home"
     home.mkdir()
-    (home / "sync.lock").write_text(json.dumps({"at": 1000.0 - 1801}))   # > 30 min
+    lock = home / "sync.lock"
+    lock.write_text(json.dumps({"at": 1000.0 - 1801}))   # > 30 min
+    old = time.time() - 4000
+    os.utime(lock, (old, old))                           # mtime agrees: stale on both clocks
     monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
     argvs = []
     cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
                   find_bin=lambda n: "/fake/brew" if n == "brew" else None)
     assert len(argvs) == 1
     assert json.loads((home / "sync.lock").read_text())["at"] == 1000.0
+
+
+# ------------------- 0.5.0 final review: probe-due spawn, lock mtime fallback, notice reset
+
+def test_sync_spawns_worker_when_a_probe_is_due_despite_binary_present(tmp_path, monkeypatch, capsys):
+    """Review Critical 1: a PRESENT-but-broken linter (probe fails) must still get a worker.
+    The main sync cannot probe (must stay < 1 s), so it trusts the worker's cached probe
+    verdict and re-spawns at most once per PROBE_INTERVAL."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    argvs = []
+    # binary present, NO probe record -> worker must run to probe it
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/" + n)
+    assert len(argvs) == 1
+    msg = json.loads(capsys.readouterr().out.strip())["systemMessage"]
+    assert "fake" in msg and "verifying" in msg
+    # a FRESH probe record -> silent, no spawn
+    (home / "sync-state.json").write_text(json.dumps(
+        {"results": {}, "probes": {"fake": {"ok": True, "at": 1000.0}}}))
+    argvs.clear()
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0 + 3600), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/" + n)
+    assert argvs == [] and capsys.readouterr().out == ""
+    # after PROBE_INTERVAL the probe is due again
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0 + cc.PROBE_INTERVAL + 1),
+                  spawn=argvs.append, find_bin=lambda n: "/fake/" + n)
+    assert len(argvs) == 1
+
+
+def test_worker_records_probe_verdicts_for_the_main_sync(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    cc._sync_worker(home, "polyglot", _sync_clock(7000.0),
+                    run_install=lambda cmd: (True, "ok"), ready=lambda lin: True)
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state["probes"]["fake"] == {"ok": True, "at": 7000.0}
+    assert "fake" not in state["results"]     # ready -> nothing installed, nothing to report
+
+
+def test_sync_empty_lock_with_fresh_mtime_is_held(tmp_path, monkeypatch, capsys):
+    """Review Important 3: the O_EXCL create makes the file exist before its JSON is
+    visible; an unparseable lock must fall back to its MTIME, not be read as stale."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lock = home / "sync.lock"
+    lock.write_text("")                        # created, content not visible yet
+    now = time.time()
+    os.utime(lock, (now, now))                 # fresh mtime
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    assert argvs == [] and capsys.readouterr().out == ""
+
+
+def test_sync_empty_lock_with_old_mtime_is_stale(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lock = home / "sync.lock"
+    lock.write_text("")
+    old = time.time() - 4000
+    os.utime(lock, (old, old))
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    argvs = []
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=argvs.append,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    assert len(argvs) == 1
+
+
+def test_manager_notice_resets_once_a_spawn_happens(tmp_path, monkeypatch):
+    """Review Important 4: if the user later installs the package manager, a later
+    no-manager state must be able to print the line again."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    (home / "sync-state.json").write_text(json.dumps({"results": {}, "manager_notice": True}))
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=lambda argv: None,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state["manager_notice"] is False
+
+
+def test_probe_fixture_candidates_and_fallback(tmp_path):
+    """Review Critical 2: the probe fixture must resolve in both layouts (plugin bin/..,
+    portable scripts/..), and when an install shipped the CLI alone, a temp fallback keeps
+    the probe runnable instead of failing forever. The fallback must equal the fixture."""
+    packaged = cc._probe_fixture_path("scripts/probe/bad.ts")
+    assert packaged.is_file() and packaged.name == "bad.ts"
+    fixture_body = packaged.read_text(encoding="utf-8")
+    assert cc.PROBE_FALLBACK_SOURCE.strip() in fixture_body   # the planted-error line is the fixture
+    fb = cc._probe_fixture_path("no-such-dir/definitely-missing.ts")
+    assert fb.is_file() and fb.read_text(encoding="utf-8") == cc.PROBE_FALLBACK_SOURCE
 
 
 def test_worker_records_installed_and_failed_per_id(tmp_path, monkeypatch):

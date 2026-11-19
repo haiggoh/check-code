@@ -57,6 +57,10 @@ COPY_FILES = [
     ".claude-plugin/plugin.json",
     "hooks/hooks.json",
     "scripts/check-code.py",
+    # the CLI's __file__-relative runtime resources: the tslsp driver and the probe
+    # fixture. Without them typescript-lsp cannot run and never passes its probe.
+    "scripts/tslsp-lint.py",
+    "scripts/probe/bad.ts",
     "skills/check-code/SKILL.md",
 ]
 HOST_TO_PORTABLE = {"scripts/check-code.py": "bin/check-code.py"}  # host rel -> portable rel
@@ -88,7 +92,16 @@ COMPONENTS = [
      "adaptation_class": "mechanical", "evidence_level": "source-inspected",
      "surfaces": {"chat": False, "cowork": True, "code": True},
      "notes": "moved bin/ -> scripts/ per C1 (top-level bin blocks Chat/Cowork installs); "
-              "self-contained stdlib script, no __file__-relative resources; hook entry point"},
+              "stdlib script; its __file__-relative resources (tslsp-lint.py, probe/bad.ts) "
+              "ship beside it — 0.4.6 added them without extending this list"},
+    {"path": "scripts/tslsp-lint.py", "kind": "hook-script",
+     "adaptation_class": "native-unchanged", "evidence_level": "fixture-tested",
+     "surfaces": {"chat": False, "cowork": True, "code": True},
+     "notes": "copied verbatim; the LSP stdio driver the CLI spawns for typescript-lsp"},
+    {"path": "scripts/probe/bad.ts", "kind": "fixture",
+     "adaptation_class": "native-unchanged", "evidence_level": "fixture-tested",
+     "surfaces": {"chat": False, "cowork": True, "code": True},
+     "notes": "copied verbatim; one planted TS2322 — the functional probe's input"},
 ]
 
 
