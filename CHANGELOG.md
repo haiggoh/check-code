@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.1] — 2026-11-19
+
+### Fixed — deferred minors from the 0.5.0 pre-ship review
+- `scripts/tslsp-lint.py`: `file://` URIs are percent-encoded (`_file_uri`), so a path with a
+  space no longer produces a broken URI; the server's Popen streams are bound to non-Optional
+  locals so the framing closures type-check (clears the pyright Optional advisories).
+- `doctor` reports the truth for probe-carrying linters: a present-but-broken binary shows
+  `present but NOT functional (probe failed) — run: <cmd>` and counts as missing, instead of a
+  bare path. Tier exclusion still only affects the MISSING branch — an installed out-of-tier
+  linter still runs.
+- Declined with reasons (ledger in the handoff): the worker's double probe per installed
+  linter (cost only on broken linters, 24 h-gated, detached) and the `probe_runner` seam
+  (the whole `ready` callable is the worker's injection point).
+
 ## [0.5.0] — 2026-11-19
 
 ### Added — auto-install: missing tier linters install themselves at session start
