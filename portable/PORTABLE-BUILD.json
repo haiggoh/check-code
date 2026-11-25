@@ -78,13 +78,13 @@
   "files": {
     ".claude-plugin/plugin.json": "339d254a87dc6ea42df19743a6498ebefed9d21953578303a126a6a8fa933ca7",
     "hooks/hooks.json": "71970c98eb3f5e379b8ef4b63ead7cda896c23d03aae6f6b5c7005c9afee032a",
-    "scripts/check-code.py": "9bfe715bc622dcaec72261c25924c3637524ff11689614336592855d506f1bbc",
+    "scripts/check-code.py": "2901c7f31ad3d760e0018a63e19383539b681047ab29a1a1dafa6ec1238c995d",
     "scripts/probe/bad.ts": "3627cf2be833dec13811eeb86adfc50c78fdb1179de4d421686237d8ca087b57",
     "scripts/tslsp-lint.py": "2cabd1148a698ad0927b19ff5e684dfa0d072b2946a042f486f1ead09cae53d9",
     "skills/check-code/SKILL.md": "11f60fd31e9c617150f26be1e4e98512cb7e1fd73e5ea0444b6edf06fb5d8ad3"
   },
   "schema": "haiggoh-portable-build/1",
-  "source_commit": "05df5db2afe11e132ab5b952c32e01c22a9fcd1a",
+  "source_commit": "62edd8d558b4403698167ed77552d747a987f28b",
   "source_repo": "haiggoh/check-code",
   "transform_version": "1"
 }

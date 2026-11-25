@@ -100,7 +100,7 @@ def requirement_unmet(linter):
     check = globals().get(getattr(entry, "__name__", ""), entry)
     if check():
         return None
-    return req.get("reason") or ""
+    return req.get("reason") or "requirement not met: %s" % name   # never "" (falsy = met)
 
 
 def _load_json(path, default):
@@ -196,9 +196,13 @@ def _swiftformat_parse(stdout):
     """swiftformat --lint --reporter json prints a JSON array ON STDOUT (the default
     reporter writes gcc-style lines to stderr, mixed with progress lines):
     [{"file", "line", "reason", "rule_id"}]. Lines are already 1-based; rule_id is the code."""
+    try:
+        data = json.loads(stdout or "[]")
+    except ValueError:
+        return []          # a crashed linter prints error text/whitespace, not JSON
     return [(int(item.get("line", 0)), str(item.get("rule_id") or "swiftformat"),
              str(item.get("reason", "")))
-            for item in json.loads(stdout or "[]") if isinstance(item, dict)]
+            for item in data if isinstance(item, dict)]
 
 
 _ACTIONLINT_RULE = re.compile(r"\[([\w/.-]+)\]\s*$")
@@ -353,16 +357,17 @@ BUILTIN = [
 ]
 
 
-def install_cmds(linter):
+def install_cmds(linter, home=None):
     """Every install command for a linter, in order: [cmd] + extra, each a list[str], with
-    the {home} placeholder expanded to config_home(). Local linters may carry a plain
-    string; a malformed entry degrades to what it holds instead of crashing a display path."""
+    the {home} placeholder expanded to `home` (default config_home()). Local linters may
+    carry a plain string; a malformed entry degrades to what it holds instead of crashing
+    a display path."""
     install = linter.get("install") or ""
     if isinstance(install, str):
         return [shlex.split(install)] if install else []
     cmd = install.get("cmd", [])
     cmds = [shlex.split(cmd)] if isinstance(cmd, str) and cmd else [list(cmd)]
-    home = str(config_home())
+    home = str(home or config_home())
     for extra in install.get("extra") or []:
         cmds.append([str(part).replace("{home}", home) for part in extra])
     return cmds
@@ -1033,15 +1038,17 @@ def _build_setup_epilog():
                   "languages"
                   % (_tier_summary("basic"), ", ".join(_tier_languages("basic"))))
     gated = [lin for lin in BUILTIN if lin.get("requires")]
-    gate = ("\n".join(_wrap("  %-11s requires %s -- installed only when the requirement is "
-                            "met; otherwise skipped with a one-time notice (never retried "
-                            "daily)" % (lin["id"], lin["requires"].get("check", "")))
-                      for lin in gated) + "\n") if gated else ""
+    gate = "\n".join("  %-11s requires %s" % (lin["id"], lin["requires"].get("check", ""))
+                     for lin in gated) or "  (none)"
     return """\
 tiers:
 %s
 %s
-%s  none      no external linters: built-in checks still run and coverage notices stay silent
+  none      no external linters: built-in checks still run and coverage notices stay silent
+requirements:
+%s
+  gated linters install only when their requirement is met; otherwise they are skipped
+  with a one-time notice (never retried daily)
 interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
 plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
 a missing package manager prints the command to run yourself instead of failing. After each
@@ -1116,11 +1123,14 @@ def _print_plan(tier, plan):
               "missing-linter notice stays silent")
         return
     for linter, status, detail in plan:
-        print("  %-11s %s: %s" % (linter["id"],
-                                  {"installed": "already installed",
-                                   "install": "will install",
-                                   "cannot": "cannot install here",
-                                   "skipped": "skipped (needs Xcode)"}[status], detail))
+        if status == "skipped":
+            label = "skipped (needs %s)" % str(
+                (linter.get("requires") or {}).get("check", "?")).capitalize()
+        else:
+            label = {"installed": "already installed",
+                     "install": "will install",
+                     "cannot": "cannot install here"}[status]
+        print("  %-11s %s: %s" % (linter["id"], label, detail))
 
 
 def record_tier(tier):
@@ -1316,11 +1326,18 @@ def _sync_main_run(home, tier, clock, spawn, find_bin, say):
     # this release exists to kill. Probing here would be too slow, so the worker probes
     # and caches the verdict, and sync re-spawns at most once per PROBE_INTERVAL.
     probes = state.get("probes") or {}
+    # a probe-carrying linter whose repair steps (extra) never succeeded is due NOW, even
+    # with a fresh cache: a cached FAILED probe under an older release must not wait out
+    # PROBE_INTERVAL when this release can fix it (Review Focus 3)
+    extra_pending = {lin["id"] for lin in BUILTIN
+                     if len(install_cmds(lin)) > 1
+                     and not (state.get("extra_ok") or {}).get(lin["id"])}
     due = [lin for lin in BUILTIN
            if tier_covers(tier, lin["tier"]) and lin["id"] not in unmet and "probe" in lin
            and find_bin(lin["binary"])
-           and not (isinstance(probes.get(lin["id"]), dict)
-                    and clock() - probes[lin["id"]].get("at", 0) < PROBE_INTERVAL)]
+           and (lin["id"] in extra_pending
+                or not (isinstance(probes.get(lin["id"]), dict)
+                        and clock() - probes[lin["id"]].get("at", 0) < PROBE_INTERVAL))]
     due = [lin for lin in due if lin["id"] not in {m["id"] for m in missing}]
     if not missing and not due:
         return 0
@@ -1391,15 +1408,21 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
         if ok_ready:
             continue                     # probe says it works — nothing to do
         prev = (state.get("results") or {}).get(lid) or {}
+        cmds = install_cmds(lin, home)
         if prev.get("status") == "failed" and now - prev.get("at", 0) < SYNC_RETRY_AFTER:
-            continue                     # a broken installer must not loop every session
-        ok, reason = _run_installs(install_cmds(lin), run_install)
+            if len(cmds) == 1 or (state.get("extra_ok") or {}).get(lid):
+                continue                 # a broken installer must not loop every session
+            # else: the catalog gained repair steps (extra) since the failure — try them now
+        ok, reason = _run_installs(cmds, run_install)
+        if ok and len(cmds) > 1:
+            state.setdefault("extra_ok", {})[lid] = True   # extra steps applied
         ok_ready = ready(lin)            # verify by outcome: probe decides, not the exit code
         state["probes"][lid] = {"ok": ok_ready, "at": now}
         state.setdefault("results", {})[lid] = {
             "status": "installed" if ok_ready else "failed",
-            "reason": reason if (ok and ok_ready) else (reason or "install did not make "
-                                                         "the linter ready (probe failed)"),
+            "reason": reason if ok_ready else ("install did not make the linter ready "
+                                                "(probe failed)" if ok
+                                                else (reason or "install failed")),
             "cmd": install_hint(lin), "at": now, "reported": False}
         _save_sync_state(home, state)
 

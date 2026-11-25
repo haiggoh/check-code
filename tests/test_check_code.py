@@ -1321,8 +1321,8 @@ def test_worker_runs_extra_commands_then_probes(tmp_path, monkeypatch):
 
     cc._sync_worker(home, "polyglot", _sync_clock(5000.0), run_install, ready)
     assert calls == [["brew", "install", "fake"],
-                     ["npm", "install", "--prefix", str(cc.config_home()) + "/tsserver",
-                      "typescript@6"]]
+                     ["npm", "install", "--prefix", str(home / "tsserver"),
+                      "typescript@6"]]          # {home} expands to the home the worker was given
     state = json.loads((home / "sync-state.json").read_text())
     assert state["results"]["fake"]["status"] == "installed"
 
@@ -1472,10 +1472,17 @@ def test_worker_never_installs_unmet(tmp_path, monkeypatch):
     assert "swiftlint" not in (state.get("probes") or {})   # never probed either
 
 
+def test_requirement_unmet_with_empty_reason_is_still_unmet(monkeypatch):
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+    lin = _fake_linter(requires={"check": "xcode", "reason": ""})
+    assert cc.requirement_unmet(lin)                 # truthy, never "" -> callers can't miss it
+
+
 def test_setup_help_names_the_xcode_gate():
     line = next(ln for ln in cc.HELP_EPILOG.splitlines() if "swiftlint" in ln)
     assert "requires xcode" in line
     assert "xcode" in cc.SETUP_EPILOG
+    assert "requirements:" in cc.SETUP_EPILOG       # gated linters get their own section, not a tier row
     for argv in (("--help",), ("setup", "--help")):   # the shipped CLI text, not just constants
         r = cli(*argv)
         assert r.returncode == 0 and "xcode" in (r.stdout + r.stderr), argv
@@ -1542,6 +1549,13 @@ def test_swiftformat_parser_reads_real_fixture():
 def test_swiftformat_parser_empty_is_no_findings():
     assert cc._swiftformat_parse("") == []
     assert cc._swiftformat_parse("[\n\n]") == []       # clean file: empty JSON array on stdout
+
+
+def test_swiftformat_parser_tolerates_non_json_stdout():
+    """A crashed/odd swiftformat (error text or whitespace on stdout) must not crash the
+    parser — fail quiet to no findings, like the gcc parser skipping unmatched lines."""
+    assert cc._swiftformat_parse("  \n") == []
+    assert cc._swiftformat_parse("error: Unexpected end of file at 4:1") == []
 
 
 BAD_SWIFT = """class Fetchdata {
@@ -1879,6 +1893,7 @@ def test_worker_records_installed_and_failed_per_id(tmp_path, monkeypatch):
     assert not state["results"]["fake"]["reported"]
     assert state["results"]["bad"]["status"] == "failed"
     assert state["results"]["bad"]["cmd"] == "brew install broken-pkg"
+    assert "probe" in state["results"]["bad"]["reason"]   # not the bare "ok" of a succeeded cmd
     assert not (home / "sync.lock").exists()   # worker releases the lock
 
 
@@ -1903,6 +1918,66 @@ def test_worker_retries_failed_ids_only_after_24h(tmp_path, monkeypatch):
     cc._sync_worker(home, "polyglot", _sync_clock(1000.0 + 86401), run_install,
                     lambda lin: False)
     assert calls == [["brew", "install", "fake2"]]      # > 24 h: retried once
+
+
+def test_main_spawns_for_failed_probe_when_extra_pending(tmp_path, monkeypatch):
+    """Review Focus 3: a user whose typescript-lsp probe FAILED (cached fresh under 0.5.2)
+    must be respawned on the NEXT sync after 0.5.3 — the catalog now has repair steps (extra)
+    that never succeeded — not wait out PROBE_INTERVAL."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"},
+                       install={"manager": "brew", "cmd": ["brew", "install", "fake"],
+                                "extra": [["npm", "install", "--prefix", "{home}/tsserver",
+                                           "typescript@6"]]})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    (home / "sync-state.json").write_text(json.dumps({
+        "probes": {"fake": {"ok": False, "at": 1000.0}},
+        "results": {"fake": {"status": "failed", "reason": "noServer",
+                             "cmd": "brew install fake", "at": 1000.0, "reported": True}}}))
+    spawned = []
+    cc._sync_main_run(home, "polyglot", _sync_clock(2000.0), spawned.append,
+                      lambda n: "/fake/" + n, lambda m: None)
+    assert len(spawned) == 1             # fresh-but-FAILED probe + pending extra -> due now
+
+
+def test_worker_retries_failed_extra_linter_within_24h(tmp_path, monkeypatch):
+    """The worker's 24 h failed-retry guard must NOT suppress the new extra repair steps:
+    with extra pending, the installs run even 1 h after the last failure."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(install={"manager": "brew", "cmd": ["brew", "install", "fake"],
+                                "extra": [["npm", "install", "--prefix", "{home}/tsserver",
+                                           "typescript@6"]]})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    (home / "sync-state.json").write_text(json.dumps({"results": {"fake": {
+        "status": "failed", "reason": "noServer", "cmd": "brew install fake",
+        "at": 1000.0, "reported": True}}}))
+    calls = []
+    cc._sync_worker(home, "polyglot", _sync_clock(1000.0 + 3600),
+                    lambda cmd: (calls.append(list(cmd)), (True, "ok"))[1],
+                    lambda lin: False)       # probe still fails — but the repair must RUN
+    assert len(calls) == 2               # brew cmd + npm extra both ran despite the 24 h guard
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state.get("extra_ok", {}).get("fake") is True
+
+
+def test_worker_keeps_24h_guard_once_extra_succeeded(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(install={"manager": "brew", "cmd": ["brew", "install", "fake"],
+                                "extra": [["npm", "install", "--prefix", "{home}/tsserver",
+                                           "typescript@6"]]})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    (home / "sync-state.json").write_text(json.dumps({
+        "extra_ok": {"fake": True},
+        "results": {"fake": {"status": "failed", "reason": "probe", "cmd": "x",
+                             "at": 1000.0, "reported": True}}}))
+    calls = []
+    cc._sync_worker(home, "polyglot", _sync_clock(1000.0 + 3600),
+                    lambda cmd: (calls.append(list(cmd)), (True, "ok"))[1],
+                    lambda lin: False)
+    assert calls == []                   # extra already applied: the 24 h guard holds
 
 
 def test_sync_reports_worker_results_once(tmp_path, monkeypatch, capsys):
