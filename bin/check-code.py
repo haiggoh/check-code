@@ -60,6 +60,49 @@ def find_binary(name):
     return shutil.which(name, path=os.environ.get("PATH", "") + os.pathsep + extra)
 
 
+# ---------------------------------------------------------------- install requirements
+# A catalog entry may declare "requires": the named check decides whether setup/sync may
+# install it at all. An unmet gate means SKIP plus a one-time notice, never an install.
+
+def _xcode_select():
+    """`xcode-select -p` output, or None on any failure (no CLT, timeout, missing binary)."""
+    try:
+        proc = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def xcode_present():
+    """Full Xcode.app present — a Command Line Tools path does NOT count (brew swiftlint
+    requires xcode >= 8.0, the full app). Any failure fails CLOSED (no Xcode)."""
+    try:
+        path = _xcode_select()
+    except Exception:
+        return False
+    return bool(path and ".app/Contents/Developer" in path)
+
+
+REQUIREMENT_CHECKS = {"xcode": xcode_present}
+
+
+def requirement_unmet(linter):
+    """The human reason the linter's `requires` gate is unmet, or None when met/undeclared.
+    The check resolves through the module namespace at call time, so tests can
+    monkeypatch cc.xcode_present."""
+    req = linter.get("requires") or {}
+    name = req.get("check") or ""
+    entry = REQUIREMENT_CHECKS.get(name)
+    if entry is None:
+        return None
+    # resolve via the entry's function name at call time, so monkeypatching
+    # cc.xcode_present is honoured
+    check = globals().get(getattr(entry, "__name__", ""), entry)
+    if check():
+        return None
+    return req.get("reason") or ""
+
+
 def _load_json(path, default):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -250,6 +293,13 @@ BUILTIN = [
      "parse": _biome_parse},
     {"id": "swiftlint", "language": "Swift", "binary": "swiftlint", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "swiftlint"]},
+     # brew's swiftlint requires `xcode >= 8.0` — the FULL Xcode.app, not the Command Line
+     # Tools. Without it the install is a multi-GB App Store download check-code must not
+     # trigger, so the gate skips the linter with a one-time notice instead of installing.
+     "requires": {"check": "xcode",
+                  "reason": "swiftlint skipped: it needs the full Xcode app (a multi-GB App "
+                            "Store download), which is not installed. Install Xcode yourself "
+                            "if you want swiftlint; check-code then installs it automatically."},
      "ext": ["swift"], "shebang": None,
      "command": lambda path: ["swiftlint", "lint", "--no-cache", str(path)],
      "parse": _gcc_parse},
@@ -342,6 +392,8 @@ def _linter_help_line(lin):
         match.append("or a matching shebang")
     if lin.get("path_regex"):
         match.append("matched by path " + lin["path_regex"])
+    if lin.get("requires"):
+        match.append("requires " + str(lin["requires"].get("check", "")))
     detail = "   (%s)" % ", ".join(match) if match else ""
     return "  %-9s %-15s install: %-40s%s" % (lin["language"].lower(), lin["id"],
                                               install_hint(lin), detail)
@@ -961,11 +1013,16 @@ def _build_setup_epilog():
     basic = _wrap("  basic     %s (%s) -- opt in if you know you will not touch the polyglot "
                   "languages"
                   % (_tier_summary("basic"), ", ".join(_tier_languages("basic"))))
+    gated = [lin for lin in BUILTIN if lin.get("requires")]
+    gate = ("\n".join(_wrap("  %-11s requires %s -- installed only when the requirement is "
+                            "met; otherwise skipped with a one-time notice (never retried "
+                            "daily)" % (lin["id"], lin["requires"].get("check", "")))
+                      for lin in gated) + "\n") if gated else ""
     return """\
 tiers:
 %s
 %s
-  none      no external linters: built-in checks still run and coverage notices stay silent
+%s  none      no external linters: built-in checks still run and coverage notices stay silent
 interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
 plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
 a missing package manager prints the command to run yourself instead of failing. After each
@@ -974,7 +1031,7 @@ the installer's exit code.
 environment:
   CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
                     (default ~/.claude/check-code)
-""" % (poly, basic)
+""" % (poly, basic, gate)
 
 
 SETUP_EPILOG = _build_setup_epilog()
@@ -1019,6 +1076,10 @@ def setup_plan(tier, probe_runner=None):
     for linter in [dict(item) for item in BUILTIN]:
         if not tier_covers(tier, linter["tier"]):
             continue
+        reason = requirement_unmet(linter)
+        if reason:
+            plan.append((linter, "skipped", reason))
+            continue
         if linter_ready(linter, probe_runner):
             plan.append((linter, "installed", find_binary(linter["binary"])))
         elif find_binary(linter["install"]["manager"]):
@@ -1039,7 +1100,8 @@ def _print_plan(tier, plan):
         print("  %-11s %s: %s" % (linter["id"],
                                   {"installed": "already installed",
                                    "install": "will install",
-                                   "cannot": "cannot install here"}[status], detail))
+                                   "cannot": "cannot install here",
+                                   "skipped": "skipped (needs Xcode)"}[status], detail))
 
 
 def record_tier(tier):
@@ -1199,6 +1261,22 @@ def _sync_main_run(home, tier, clock, spawn, find_bin, say):
     if tier == "none":
         return 0
     state = _load_sync_state(home)
+    # gated linters (e.g. swiftlint without full Xcode): say the reason once per linter,
+    # clear the flag when the requirement becomes met, and never spawn work for them
+    notices = state.setdefault("requires_notice", {})
+    for lin in BUILTIN:
+        if not tier_covers(tier, lin["tier"]):
+            continue
+        reason = requirement_unmet(lin)
+        if reason:
+            if not notices.get(lin["id"]):
+                say(reason)
+                notices[lin["id"]] = True
+                _save_sync_state(home, state)
+        elif notices.pop(lin["id"], None) is not None:
+            _save_sync_state(home, state)
+    unmet = {lin["id"] for lin in BUILTIN
+             if tier_covers(tier, lin["tier"]) and requirement_unmet(lin)}
     pending = [(lid, res) for lid, res in sorted(state.get("results", {}).items())
                if not res.get("reported")]
     if pending:
@@ -1212,14 +1290,16 @@ def _sync_main_run(home, tier, clock, spawn, find_bin, say):
             res["reported"] = True
         _save_sync_state(home, state)
     missing = [lin for lin in BUILTIN
-               if tier_covers(tier, lin["tier"]) and not find_bin(lin["binary"])]
+               if tier_covers(tier, lin["tier"]) and lin["id"] not in unmet
+               and not find_bin(lin["binary"])]
     # A PRESENT binary is only trusted when the worker's cached probe verdict is fresh:
     # present-but-broken (stub typescript lib -> noServer) is the exact silent failure
     # this release exists to kill. Probing here would be too slow, so the worker probes
     # and caches the verdict, and sync re-spawns at most once per PROBE_INTERVAL.
     probes = state.get("probes") or {}
     due = [lin for lin in BUILTIN
-           if tier_covers(tier, lin["tier"]) and "probe" in lin and find_bin(lin["binary"])
+           if tier_covers(tier, lin["tier"]) and lin["id"] not in unmet and "probe" in lin
+           and find_bin(lin["binary"])
            and not (isinstance(probes.get(lin["id"]), dict)
                     and clock() - probes[lin["id"]].get("at", 0) < PROBE_INTERVAL)]
     due = [lin for lin in due if lin["id"] not in {m["id"] for m in missing}]
@@ -1282,6 +1362,8 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
     for lin in [dict(item) for item in BUILTIN]:
         if not tier_covers(tier, lin["tier"]):
             continue
+        if requirement_unmet(lin):
+            continue                   # gated: never installed, probed or retried
         lid = lin["id"]
         ok_ready = ready(lin)
         # every verdict is cached, so the fast main sync can trust "present" without probing

@@ -1347,6 +1347,127 @@ def test_extra_command_failure_is_reported(tmp_path, monkeypatch):
     assert res["status"] == "failed" and "npm" in res["reason"]
 
 
+# ---- 0.5.3: `requires` gate — swiftlint only when full Xcode is present ---------------
+
+XCODE_NOTICE = ("swiftlint skipped: it needs the full Xcode app (a multi-GB App Store "
+                "download), which is not installed. Install Xcode yourself if you want "
+                "swiftlint; check-code then installs it automatically.")
+
+
+def _swiftlint_entry():
+    return next(e for e in cc.BUILTIN if e["id"] == "swiftlint")
+
+
+def test_swiftlint_requires_carries_the_exact_notice_copy():
+    req = _swiftlint_entry()["requires"]
+    assert req["check"] == "xcode" and req["reason"] == XCODE_NOTICE
+
+
+def test_xcode_present_rejects_command_line_tools(monkeypatch):
+    monkeypatch.setattr(cc, "_xcode_select", lambda: "/Library/Developer/CommandLineTools")
+    assert cc.xcode_present() is False          # CLT is NOT full Xcode
+    monkeypatch.setattr(cc, "_xcode_select",
+                        lambda: "/Applications/Xcode.app/Contents/Developer")
+    assert cc.xcode_present() is True
+
+    def boom():
+        raise OSError("xcode-select missing")
+    monkeypatch.setattr(cc, "_xcode_select", boom)
+    assert cc.xcode_present() is False
+
+
+def test_setup_plan_skips_unmet_requirement(monkeypatch):
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+    monkeypatch.setattr(cc, "find_binary", lambda n: "/fake/brew" if n == "brew" else None)
+    plan = cc.setup_plan("polyglot")
+    sw = [p for p in plan if p[0]["id"] == "swiftlint"][0]
+    assert sw[1] == "skipped"
+    assert sw[2].startswith("swiftlint skipped: it needs the full Xcode app")
+
+
+def test_requires_met_installs_normally(monkeypatch):
+    monkeypatch.setattr(cc, "xcode_present", lambda: True)
+    monkeypatch.setattr(cc, "find_binary", lambda n: "/fake/brew" if n == "brew" else None)
+    plan = cc.setup_plan("polyglot")
+    sw = [p for p in plan if p[0]["id"] == "swiftlint"][0]
+    assert sw[1] == "install"                    # Xcode users see no change
+
+
+def test_print_plan_labels_skipped_and_setup_never_installs_it(monkeypatch, capsys):
+    calls = _stub_setup(monkeypatch)
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+    rc = cc.cmd_setup(setup_args("polyglot"))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "skipped (needs Xcode)" in out
+    assert all("swiftlint" not in " ".join(c) for c in calls)   # never installed while gated
+
+
+def test_sync_says_gate_reason_once_and_spawns_nothing_for_it(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(id="swiftlint", binary="swiftlint",
+                       requires={"check": "xcode", "reason": XCODE_NOTICE})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+    said, spawned = [], []
+
+    def find_bin(n):
+        return "/fake/brew" if n == "brew" else None
+
+    cc._sync_main_run(home, "polyglot", _sync_clock(1000.0), spawned.append, find_bin, said.append)
+    assert said == [XCODE_NOTICE] and spawned == []
+    cc._sync_main_run(home, "polyglot", _sync_clock(2000.0), spawned.append, find_bin, said.append)
+    assert said == [XCODE_NOTICE]                # once per linter, never retried daily
+
+
+def test_gate_lifts_when_xcode_appears(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(id="swiftlint", binary="swiftlint",
+                       requires={"check": "xcode", "reason": XCODE_NOTICE})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    state = {"flip": False}
+    monkeypatch.setattr(cc, "xcode_present", lambda: state["flip"])
+    said, spawned = [], []
+
+    def find_bin(n):
+        return "/fake/brew" if n == "brew" else None
+
+    cc._sync_main_run(home, "polyglot", _sync_clock(1000.0), spawned.append, find_bin, said.append)
+    assert said == [XCODE_NOTICE] and spawned == []
+    state["flip"] = True                         # Xcode installed since: the gate lifts
+    cc._sync_main_run(home, "polyglot", _sync_clock(2000.0), spawned.append, find_bin, said.append)
+    assert len(spawned) == 1
+    assert any("installing swiftlint" in m for m in said)
+    st = json.loads((home / "sync-state.json").read_text())
+    assert not (st.get("requires_notice") or {}).get("swiftlint")   # flag cleared
+
+
+def test_worker_never_installs_unmet(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(id="swiftlint", binary="swiftlint",
+                       requires={"check": "xcode", "reason": XCODE_NOTICE})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+    calls = []
+    cc._sync_worker(home, "polyglot", _sync_clock(1000.0),
+                    lambda cmd: (calls.append(list(cmd)), (True, "ok"))[1],
+                    lambda lin: False)
+    assert calls == []
+    state_file = home / "sync-state.json"
+    state = json.loads(state_file.read_text()) if state_file.exists() else {}
+    assert "swiftlint" not in (state.get("results") or {})
+    assert "swiftlint" not in (state.get("probes") or {})   # never probed either
+
+
+def test_setup_help_names_the_xcode_gate():
+    line = next(ln for ln in cc.HELP_EPILOG.splitlines() if "swiftlint" in ln)
+    assert "requires xcode" in line
+    assert "xcode" in cc.SETUP_EPILOG
+
+
 def test_linter_ready_needs_the_binary(monkeypatch):
     monkeypatch.setattr(cc, "find_binary", lambda name: None)
     assert cc.linter_ready(_fake_linter()) is False
@@ -1409,6 +1530,18 @@ def test_default_probe_can_fail_when_the_code_is_absent(monkeypatch):
     ok, detail = cc._default_probe(lin)
     assert ok is False
     assert "2322" in detail
+
+
+def test_failed_probe_detail_carries_the_last_stderr_line(monkeypatch):
+    """M1 QC finding: the failing probe detail must carry the driver's own last stderr
+    line (the TS7 hint), not just the missing codes — a real subprocess writes it."""
+    lin = _fake_linter(probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"})
+    lin["command"] = lambda path: ["/bin/sh", "-c",
+                                   "echo first-stderr-line >&2; echo probe-stderr-tail >&2"]
+    monkeypatch.setattr(cc, "find_binary", lambda name: None)   # cmd[0] stays "/bin/sh"
+    ok, detail = cc._default_probe(lin)
+    assert ok is False
+    assert "probe-stderr-tail" in detail and "first-stderr-line" not in detail
 
 
 # ------------------------------------------- 0.5.0: sync (SessionStart auto-install)
