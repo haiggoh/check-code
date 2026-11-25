@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -102,3 +103,44 @@ def test_file_uri_percent_encodes_spaces_and_keeps_plain_paths():
     """0.5.1 deferred minor: a path with a space must not produce a broken file:// URI."""
     assert tslsp._file_uri("/tmp/a b/c d.ts") == "file:///tmp/a%20b/c%20d.ts"
     assert tslsp._file_uri("/plain/path.ts") == "file:///plain/path.ts"
+
+
+# ---- 0.5.3: private typescript@6 lib under $CHECK_CODE_HOME/tsserver (TS 7 has none) --
+
+def test_tsserver_lib_prefers_private_home_lib(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    lib = home / "tsserver" / "node_modules" / "typescript" / "lib"
+    lib.mkdir(parents=True)
+    (lib / "tsserver.js").write_text("")
+    (lib / "typescript.js").write_text("")
+    other = tmp_path / "other-lib"          # a complete machine lib must NOT win
+    other.mkdir()
+    (other / "tsserver.js").write_text("")
+    (other / "typescript.js").write_text("")
+    monkeypatch.setenv("CHECK_CODE_HOME", str(home))
+    monkeypatch.delenv("CHECK_CODE_TSSERVER_LIB", raising=False)
+    monkeypatch.setattr(tslsp, "_FALLBACK_LIB_DIRS", [str(other)])
+    assert tslsp._tsserver_lib() == str(lib)
+
+
+def test_tsserver_lib_skips_ts7_layout(tmp_path, monkeypatch):
+    ts7 = tmp_path / "ts7-lib"              # TS 7 lib: tsc.js + getExePath.js, no tsserver.js
+    ts7.mkdir()
+    (ts7 / "tsc.js").write_text("")
+    (ts7 / "getExePath.js").write_text("")
+    monkeypatch.setenv("CHECK_CODE_TSSERVER_LIB", str(ts7))
+    monkeypatch.setenv("CHECK_CODE_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.setattr(tslsp, "_FALLBACK_LIB_DIRS", [])
+    assert tslsp._tsserver_lib() is None
+
+
+def test_runner_names_the_ts7_cause_when_no_lib(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("CHECK_CODE_HOME", str(tmp_path / "empty-home"))
+    monkeypatch.delenv("CHECK_CODE_TSSERVER_LIB", raising=False)
+    monkeypatch.setattr(tslsp, "_FALLBACK_LIB_DIRS", [str(tmp_path / "nope")])
+    monkeypatch.setattr(sys, "argv", ["tslsp-lint.py", str(tmp_path / "a.ts")])
+    with pytest.raises(SystemExit) as exc:
+        tslsp.main()
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "TypeScript 7" in err and "typescript@6" in err

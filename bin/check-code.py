@@ -11,6 +11,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -262,10 +263,13 @@ BUILTIN = [
      "tier": "polyglot",
      # brew's typescript-language-server ships only cli.mjs and its sibling typescript
      # package can be a stub, so a bare install can be present but BROKEN (noServer on
-     # every request): the typescript lib installs with it, and the probe below is what
-     # decides "installed" (a functional probe, not a binary on PATH).
+     # every request): the probe below is what decides "installed" (a functional probe,
+     # not a binary on PATH). TypeScript 7 is native and ships NO tsserver.js at all, so
+     # the extra step installs a PRIVATE typescript@6 under $CHECK_CODE_HOME/tsserver,
+     # which tslsp-lint.py looks up first — the user's global typescript is never touched.
      "install": {"manager": "brew",
-                 "cmd": ["brew", "install", "typescript-language-server", "typescript"]},
+                 "cmd": ["brew", "install", "typescript-language-server", "typescript"],
+                 "extra": [["npm", "install", "--prefix", "{home}/tsserver", "typescript@6"]]},
      "ext": ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"], "shebang": None,
      "probe": {"fixture": "scripts/probe/bad.ts", "expect_code": "2322"},
      "command": _tslsp_command, "parse": _tslsp_parse},
@@ -280,14 +284,27 @@ BUILTIN = [
 ]
 
 
+def install_cmds(linter):
+    """Every install command for a linter, in order: [cmd] + extra, each a list[str], with
+    the {home} placeholder expanded to config_home(). Local linters may carry a plain
+    string; a malformed entry degrades to what it holds instead of crashing a display path."""
+    install = linter.get("install") or ""
+    if isinstance(install, str):
+        return [shlex.split(install)] if install else []
+    cmd = install.get("cmd", [])
+    cmds = [shlex.split(cmd)] if isinstance(cmd, str) and cmd else [list(cmd)]
+    home = str(config_home())
+    for extra in install.get("extra") or []:
+        cmds.append([str(part).replace("{home}", home) for part in extra])
+    return cmds
+
+
 def install_hint(linter):
-    """Display form of the install command (local linters carry a plain string; a malformed
-    entry degrades to what it holds instead of crashing a display path)."""
+    """Display form of ALL the install commands, joined with ' && '."""
     install = linter.get("install") or ""
     if isinstance(install, str):
         return install
-    cmd = install.get("cmd", [])
-    return cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
+    return " && ".join(" ".join(str(part) for part in cmd) for cmd in install_cmds(linter))
 
 
 # ------------------------------------------- help/menu text, generated FROM the catalog
@@ -478,7 +495,11 @@ def _default_probe(linter):
     expect = str(probe.get("expect_code") or "")
     if expect and expect in codes:
         return True, "probe ok (%s reported)" % expect
-    return False, "probe did not report %s (got: %s)" % (expect, ", ".join(codes) or "nothing")
+    detail = "probe did not report %s (got: %s)" % (expect, ", ".join(codes) or "nothing")
+    err_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    if err_lines:
+        detail += "; last stderr: %s" % err_lines[-1]   # the driver's own last word (e.g. the TS7 hint)
+    return False, detail
 
 
 def linter_ready(linter, probe_runner=None):
@@ -978,6 +999,16 @@ def _run_install(cmd):
     return proc.returncode == 0, reason
 
 
+def _run_installs(cmds, run_install):
+    """Run install commands in order, stopping at the first failure: (ok, reason).
+    run_install is THE injectable single-command runner (tests replace it)."""
+    for cmd in cmds:
+        ok, reason = run_install(cmd)
+        if not ok:
+            return False, reason
+    return True, "ok"
+
+
 def setup_plan(tier, probe_runner=None):
     """[(linter, status, detail)] for the tier: installed / install / cannot.
     "installed" means READY (binary resolves AND the catalog's probe passes), not merely
@@ -1082,7 +1113,7 @@ def cmd_setup(args):
     for linter, status, reason in plan:
         if status != "install":
             continue
-        _run_install(linter["install"]["cmd"])
+        _run_installs(install_cmds(linter), _run_install)
         # verify by outcome, not by exit code: ready = binary AND probe, not just on PATH
         if linter_ready(linter):
             print("  %-11s installed: %s" % (linter["id"], find_binary(linter["binary"])))
@@ -1261,7 +1292,7 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
         prev = (state.get("results") or {}).get(lid) or {}
         if prev.get("status") == "failed" and now - prev.get("at", 0) < SYNC_RETRY_AFTER:
             continue                     # a broken installer must not loop every session
-        ok, reason = run_install(lin["install"]["cmd"])
+        ok, reason = _run_installs(install_cmds(lin), run_install)
         ok_ready = ready(lin)            # verify by outcome: probe decides, not the exit code
         state["probes"][lid] = {"ok": ok_ready, "at": now}
         state.setdefault("results", {})[lid] = {

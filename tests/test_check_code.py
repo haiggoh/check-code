@@ -1162,6 +1162,8 @@ def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, cap
                      ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
                      ["brew", "install", "rubocop"],
                      ["brew", "install", "typescript-language-server", "typescript"],
+                     ["npm", "install", "--prefix", str(cc.config_home() / "tsserver"),
+                      "typescript@6"],
                      ["brew", "install", "actionlint"]]
     assert _config() == {"tier": "polyglot"}
     assert "installed: /bin/actionlint" in out
@@ -1268,6 +1270,81 @@ def test_typescript_lsp_entry_carries_probe_and_full_install():
     assert entry["probe"]["expect_code"] == "2322"
     fixture = Path(cc.__file__).resolve().parent.parent / entry["probe"]["fixture"]
     assert fixture.is_file(), fixture
+
+
+# ---- 0.5.3: private typescript@6 lib (TS 7 ships no tsserver.js) ---------------------
+
+def test_install_cmds_expands_home_in_extra():
+    entry = next(e for e in cc.BUILTIN if e["id"] == "typescript-lsp")
+    cmds = cc.install_cmds(entry)
+    assert cmds[0][:2] == ["brew", "install"]
+    assert cmds[-1] == ["npm", "install", "--prefix", str(cc.config_home() / "tsserver"),
+                        "typescript@6"]
+
+
+def test_install_hint_shows_every_step():
+    entry = next(e for e in cc.BUILTIN if e["id"] == "typescript-lsp")
+    assert " && npm install --prefix " in cc.install_hint(entry)
+
+
+def test_run_installs_stops_at_first_failure():
+    calls = []
+
+    def run(cmd):
+        calls.append(list(cmd))
+        return cmd[0] != "npm", ("npm: command not found" if cmd[0] == "npm" else "ok")
+
+    ok, reason = cc._run_installs([["brew", "install", "x"], ["npm", "i"], ["gem", "i"]], run)
+    assert ok is False and reason == "npm: command not found"
+    assert calls == [["brew", "install", "x"], ["npm", "i"]]
+
+
+def test_worker_runs_extra_commands_then_probes(tmp_path, monkeypatch):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(install={"manager": "brew", "cmd": ["brew", "install", "fake"],
+                                "extra": [["npm", "install", "--prefix", "{home}/tsserver",
+                                           "typescript@6"]]})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    calls = []
+    seen = {"n": 0}
+
+    def run_install(cmd):
+        calls.append(list(cmd))
+        return True, "ok"
+
+    def ready(_lin):
+        seen["n"] += 1
+        return seen["n"] > 1          # not ready before the installs, ready after them
+
+    cc._sync_worker(home, "polyglot", _sync_clock(5000.0), run_install, ready)
+    assert calls == [["brew", "install", "fake"],
+                     ["npm", "install", "--prefix", str(cc.config_home()) + "/tsserver",
+                      "typescript@6"]]
+    state = json.loads((home / "sync-state.json").read_text())
+    assert state["results"]["fake"]["status"] == "installed"
+
+
+def test_extra_command_failure_is_reported(tmp_path, monkeypatch):
+    """npm missing (node not installed yet): the failed extra step is reported with a reason
+    naming npm — the worker neither crashes nor loops."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(install={"manager": "brew", "cmd": ["brew", "install", "fake"],
+                                "extra": [["npm", "install", "--prefix", "{home}/tsserver",
+                                           "typescript@6"]]})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    calls = []
+
+    def run_install(cmd):
+        calls.append(list(cmd))
+        return (cmd[0] != "npm"), ("npm: command not found" if cmd[0] == "npm" else "ok")
+
+    cc._sync_worker(home, "polyglot", _sync_clock(5000.0), run_install, lambda _lin: False)
+    assert len(calls) == 2            # stopped at the failed extra step
+    state = json.loads((home / "sync-state.json").read_text())
+    res = state["results"]["fake"]
+    assert res["status"] == "failed" and "npm" in res["reason"]
 
 
 def test_linter_ready_needs_the_binary(monkeypatch):

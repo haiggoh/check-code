@@ -66,23 +66,33 @@ def _project_root(path):
     return nearest
 
 
+# Machine-wide fallback locations, tried only AFTER the private per-home lib. A complete
+# lib = tsserver.js + typescript.js; a TS 7 package ships neither (its lib/ holds only
+# tsc.js + getExePath.js), so it can never match.
+_FALLBACK_LIB_DIRS = [
+    "/opt/homebrew/lib/node_modules/intelephense/node_modules/typescript/lib",
+    "/opt/homebrew/lib/node_modules/typescript/lib",
+    "/opt/homebrew/opt/typescript/libexec/lib/node_modules/typescript/lib",
+    "/usr/local/lib/node_modules/typescript/lib",
+    "/usr/local/opt/typescript/libexec/lib/node_modules/typescript/lib",
+]
+
+
 def _tsserver_lib():
     """A directory containing a COMPLETE typescript lib (tsserver.js + typescript.js).
 
     The brew typescript-language-server package ships only cli.mjs; its sibling typescript
     package can be a stub (lib/ with just tsc.js), which makes tsserver never start (every
-    tsserverRequest answers {"type":"noServer"}). Find a complete lib: env override first,
-    then common locations (intelephense's bundled typescript, the global typescript,
-    brew's typescript under its `opt` path, which is what a fresh install gets)."""
+    tsserverRequest answers {"type":"noServer"}). TypeScript 7 is native and ships no
+    tsserver.js at all, so check-code installs a PRIVATE typescript@6 under
+    $CHECK_CODE_HOME/tsserver (the global typescript is never touched). Find a complete
+    lib: env override first, then the private per-home lib, then the machine locations."""
     env_dir = os.environ.get("CHECK_CODE_TSSERVER_LIB")
+    home = os.environ.get("CHECK_CODE_HOME", "~/.claude/check-code")
     candidates = [env_dir] if env_dir else []
-    candidates += [
-        "/opt/homebrew/lib/node_modules/intelephense/node_modules/typescript/lib",
-        "/opt/homebrew/lib/node_modules/typescript/lib",
-        "/opt/homebrew/opt/typescript/libexec/lib/node_modules/typescript/lib",
-        "/usr/local/lib/node_modules/typescript/lib",
-        "/usr/local/opt/typescript/libexec/lib/node_modules/typescript/lib",
-    ]
+    candidates.append(os.path.join(os.path.expanduser(home),
+                                   "tsserver", "node_modules", "typescript", "lib"))
+    candidates += _FALLBACK_LIB_DIRS
     for d in candidates:
         if d and os.path.isfile(os.path.join(d, "tsserver.js")) and os.path.isfile(os.path.join(d, "typescript.js")):
             return d
@@ -98,7 +108,15 @@ def main():
     root = _file_uri(_project_root(path))
     server = "typescript-language-server"
     lib = _tsserver_lib()
-    init_opts = {"tsserver": {"path": lib}} if lib else {}
+    if lib is None:
+        # TS 7 ships no tsserver.js and a stub lib answers noServer on every request:
+        # fail loud and name the fix instead of hanging until the timeout.
+        home = os.path.expanduser(os.environ.get("CHECK_CODE_HOME", "~/.claude/check-code"))
+        print("check-code: no TypeScript with tsserver.js found (TypeScript 7 ships none) — "
+              "run: npm install --prefix %s typescript@6"
+              % os.path.join(home, "tsserver"), file=sys.stderr)
+        sys.exit(2)
+    init_opts = {"tsserver": {"path": lib}}
     p = subprocess.Popen([server, "--stdio"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL)
     # bind to non-Optional locals so the closures below type-check (Popen with PIPE

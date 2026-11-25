@@ -99,6 +99,7 @@ coordinator on 2026-11-25.
 ## 6. Progress log (append one line per receipt: date-time, milestone, commit, verdict)
 
 - 2026-11-25 18:0x — handover written by coordinator (plan `9d32c89`).
+- 2026-11-25 20:03 — M1/Task 1 (private typescript@6 lib) landed in this commit: `install_cmds`/`_run_installs` + `extra` on typescript-lsp, `_tsserver_lib` prefers `$CHECK_CODE_HOME/tsserver/...` over fallbacks and skips the TS7 layout, runner exits 2 naming `typescript@6` when no complete lib. Tests: 8 new RED→GREEN, both touched files 186/186 (EXIT:0). Mutations A–D each confirmed RED then restored (grep clean). Real-world proof: `npm install --prefix <mktemp>/tsserver typescript@6` exit 0, `_tsserver_lib()` resolved the private lib, `test_default_probe_runs_the_real_driver_on_the_fixture` PASSED under that home. Note: the handoff's expected real-world RED did NOT reproduce — this machine has a complete lib at intelephense's bundled typescript, so the probe passed even before the fix (verified by running it); the private-lib preference is proven by the resolved-lib probe instead.
 
 ## 7. Next action
 
