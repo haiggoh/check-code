@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.5.2] — 2026-11-25
+
+### Fixed — SessionStart "Hook output looks like a JSON object but is not valid JSON"
+- `sync` could print up to THREE `{"systemMessage": …}` lines in one run (a pending
+  install report, the no-package-manager notice, and the background-install announcement).
+  Each line was valid JSON, but Claude Code parses a hook's whole stdout as ONE document, so
+  any two together failed with `JSONDecodeError: Extra data`. Fresh installs hit it on the
+  first session (brew present, npm absent), and every user hit it on the session after a
+  failed install. The run now collects messages and `_sync_main` prints a single
+  `systemMessage`, joined with ` · `, from a `finally`, so early returns still flush.
+- Tests: three new cases assert `sync` stdout parses as exactly one JSON document for each
+  pair of messages and for all three together. They were red before the fix with `Extra data:
+  line 2`.
+
 ## [0.5.1] — 2026-11-19
 
 ### Fixed — deferred minors from the 0.5.0 pre-ship review

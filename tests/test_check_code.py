@@ -1735,3 +1735,60 @@ def test_hook_missing_file_is_silent_fail_open(tmp_path):
         sys.stdout = old
     assert code == 0
     assert out.getvalue() == ""
+
+
+# ------------------------------- 0.5.2: SessionStart stdout must be ONE JSON document
+
+def _assert_single_json_document(out):
+    """Claude Code parses a SessionStart hook's whole stdout as ONE JSON value; two
+    json.dumps lines are each valid but together fail with 'looks like a JSON object but
+    is not valid JSON' (seen on colleagues' fresh installs, 2026-11-25)."""
+    text = out.strip()
+    assert text, "expected output — an empty capture would pass vacuously"
+    return json.loads(text)          # raises JSONDecodeError: Extra data on two lines
+
+
+def test_sync_pending_report_plus_spawn_prints_one_json_document(tmp_path, monkeypatch, capsys):
+    """Second session after a failed install: the pending report AND the re-spawn
+    announcement both fire — they must be merged into ONE systemMessage."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter()])
+    (home / "sync-state.json").write_text(json.dumps({"results": {"fake": {
+        "status": "failed", "reason": "boom", "cmd": "brew install fake", "at": 1,
+        "reported": False}}, "manager_notice": False}))
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=lambda argv: None,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    msg = _assert_single_json_document(capsys.readouterr().out)["systemMessage"]
+    assert "could not install fake: boom" in msg
+    assert "installing fake for your polyglot tier in the background" in msg
+
+
+def test_sync_manager_notice_plus_spawn_prints_one_json_document(tmp_path, monkeypatch, capsys):
+    """Fresh user with brew but no npm: the no-manager notice AND the background install
+    announcement both fire on the FIRST session."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    brew_lin = _fake_linter()
+    npm_lin = _fake_linter(id="npmthing", binary="npm-bin",
+                           install={"manager": "npm", "cmd": ["npm", "i", "-g", "npmthing"]})
+    monkeypatch.setattr(cc, "BUILTIN", [brew_lin, npm_lin])
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=lambda argv: None,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    msg = _assert_single_json_document(capsys.readouterr().out)["systemMessage"]
+    assert "no npm here" in msg and "installing fake" in msg
+
+
+def test_sync_all_three_messages_print_one_json_document(tmp_path, monkeypatch, capsys):
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    monkeypatch.setattr(cc, "BUILTIN", [_fake_linter(), _fake_linter(
+        id="npmthing", binary="npm-bin",
+        install={"manager": "npm", "cmd": ["npm", "i", "-g", "npmthing"]})])
+    (home / "sync-state.json").write_text(json.dumps({"results": {"fake": {
+        "status": "failed", "reason": "boom", "cmd": "brew install fake", "at": 1,
+        "reported": False}}, "manager_notice": False}))
+    cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=lambda argv: None,
+                  find_bin=lambda n: "/fake/brew" if n == "brew" else None)
+    msg = _assert_single_json_document(capsys.readouterr().out)["systemMessage"]
+    assert "could not install fake" in msg and "no npm here" in msg and "installing fake" in msg

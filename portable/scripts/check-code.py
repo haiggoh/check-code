@@ -20,7 +20,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.5.1"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.5.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -1149,14 +1149,22 @@ def _lock_held(lock, clock):
 
 def _sync_main(home, tier, clock, spawn, find_bin):
     """Fast session-start check. clock/spawn/find_bin injectable so tests never spawn,
-    probe, or touch the real PATH. Hook fail-open: any error -> exit 0, no output."""
+    probe, or touch the real PATH. Hook fail-open: any error -> exit 0.
+
+    Claude Code parses a SessionStart hook's whole stdout as ONE JSON document, so the run
+    only COLLECTS messages and this wrapper prints them as a single systemMessage — two
+    json.dumps lines are each valid but together read as 'not valid JSON' (0.5.2)."""
+    messages = []
     try:
-        return _sync_main_run(home, tier, clock, spawn, find_bin)
+        return _sync_main_run(home, tier, clock, spawn, find_bin, messages.append)
     except Exception:
         return 0
+    finally:
+        if messages:
+            _system_message("🩻 check-code: " + " · ".join(messages))
 
 
-def _sync_main_run(home, tier, clock, spawn, find_bin):
+def _sync_main_run(home, tier, clock, spawn, find_bin, say):
     if tier == "none":
         return 0
     state = _load_sync_state(home)
@@ -1168,7 +1176,7 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
                 ["could not install %s: %s — run: %s"
                  % (lid, res.get("reason") or "?", res.get("cmd") or "?")
                  for lid, res in pending if res.get("status") != "installed"]
-        _system_message("🩻 check-code: " + "; ".join(parts))
+        say("; ".join(parts))
         for _lid, res in pending:
             res["reported"] = True
         _save_sync_state(home, state)
@@ -1190,7 +1198,7 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
     spawnable = [lin for lin in work if find_bin(lin["install"]["manager"])]
     manual = [lin for lin in work if not find_bin(lin["install"]["manager"])]
     if manual and not state.get("manager_notice"):
-        _system_message("🩻 check-code: no %s here — run yourself: %s" % (
+        say("no %s here — run yourself: %s" % (
             " or ".join(sorted({lin["install"]["manager"] for lin in manual})),
             "; ".join(install_hint(lin) for lin in manual)))
         state["manager_notice"] = True
@@ -1217,7 +1225,7 @@ def _sync_main_run(home, tier, clock, spawn, find_bin):
     ids = [lin["id"] for lin in (installing or spawnable)]
     verb = "installing %s for your %s tier" % (", ".join(ids), tier) if installing \
         else "verifying %s" % ", ".join(ids)
-    _system_message("🩻 check-code: %s in the background" % verb)
+    say("%s in the background" % verb)
     return 0
 
 
