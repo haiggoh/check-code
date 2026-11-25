@@ -43,8 +43,9 @@ Tier `polyglot` (add these; each verified single-file, zero-config, machine-pars
 | Language | Linter | Picked by | Default rules (no repo config) |
 |---|---|---|---|
 | TS/JS | `biome lint` | `.ts`, `.tsx`, `.js`, `.jsx` | biome's recommended set (a repo `biome.json` still wins) |
-| TS/JS | `typescript-lsp` | `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs`, `.cjs` | tsserver's semantic diagnostics; a repo `tsconfig.json` is respected (JSX included) |
-| Swift | `swiftlint lint` | `.swift` | swiftlint's default rules (a repo `.swiftlint.yml` still wins) |
+| TS/JS | `typescript-lsp` | `.ts`, `.tsx`, `.js`, `.jsx`, `.mts`, `.cts`, `.mjs`, `.cjs` | tsserver's semantic diagnostics; a repo `tsconfig.json` is respected (JSX included). Uses a **private `typescript@6` lib** under `$CHECK_CODE_HOME/tsserver` (TypeScript 7 ships no `tsserver.js`); your global `typescript` is never touched |
+| Swift | `swiftlint lint` | `.swift` | swiftlint's default rules (a repo `.swiftlint.yml` still wins). Needs the **full Xcode app** — without it check-code skips swiftlint with a one-time notice (never retried) and installs it automatically once Xcode appears |
+| Swift | `swiftformat --lint` | `.swift` | swiftformat's default rules minus `trailingCommas` (swiftlint's `trailing_comma` forbids trailing commas, so the two never contradict). Needs no Xcode |
 | Ruby | `rubocop --lint` | `.rb` | the Lint department only: error-class cops, as ruff's set is pinned |
 | Actions | `actionlint` | `.github/workflows/*.ya?ml` | every check (schema, expressions, shell names, …) |
 
@@ -65,7 +66,7 @@ python3 "${CLAUDE_PLUGIN_ROOT}/bin/check-code.py" setup --yes            # scrip
 
 | Tier | Installs | Covers |
 |---|---|---|
-| `polyglot` — the default, recommended | ruff, shellcheck, biome, typescript-lsp, swiftlint, rubocop, actionlint | Python, shell, TS/JS (style + types), Swift, Ruby, GitHub Actions workflows |
+| `polyglot` — the default, recommended | ruff, shellcheck, biome, typescript-lsp, swiftlint, swiftformat, rubocop, actionlint | Python, shell, TS/JS (style + types), Swift, Ruby, GitHub Actions workflows |
 | `basic` — opt in | ruff, shellcheck | Python and shell |
 | `none` — opt in | nothing | built-in checks only; auto-install and coverage notices stay silent |
 

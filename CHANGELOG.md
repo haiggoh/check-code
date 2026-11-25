@@ -1,5 +1,29 @@
 # Changelog
 
+## [0.5.3] — 2026-11-25
+
+### Fixed — typescript-lsp present-but-broken under TypeScript 7 (fixed for every user)
+- TypeScript 7 is native and ships no `lib/tsserver.js`, so a brew/global TS 7 install left
+  `typescript-language-server` present-but-broken (every tsserverRequest answered
+  `noServer`). The `typescript-lsp` install now runs a second step, `npm install --prefix
+  $CHECK_CODE_HOME/tsserver typescript@6`, and `scripts/tslsp-lint.py` prefers that private
+  lib (after the `CHECK_CODE_TSSERVER_LIB` env override) and skips TS7-layout dirs. The
+  global `typescript` is never touched. With no complete lib the runner exits 2 naming the
+  fix, and a failing probe detail now carries the driver's last stderr line.
+
+### Added — `swiftformat` joins the default `polyglot` tier (no Xcode needed)
+- New catalog entry: `swiftformat --lint --reporter json --disable trailingCommas`.
+  `trailingCommas` is disabled because swiftlint's default `trailing_comma` rule FORBIDS
+  trailing commas while swiftformat's default ADDS them (opposite verdicts measured on a
+  real file) — swiftlint's rule wins.
+
+### Changed — `swiftlint` installs by default only when the full Xcode app is present
+- brew's swiftlint requires `xcode >= 8.0` (the full Xcode.app, not the Command Line
+  Tools). Catalog entries may now declare `requires`; an unmet gate means `skipped` in
+  `setup` (never installed), a one-time notice per linter at session start (never retried
+  daily), and no worker work for it. The notice flag clears automatically once Xcode
+  appears. `--help` and `setup --help` name the gate. Xcode users see no change.
+
 ## [0.5.2] — 2026-11-25
 
 ### Fixed — SessionStart "Hook output looks like a JSON object but is not valid JSON"

@@ -11,6 +11,7 @@ import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -20,7 +21,7 @@ import time
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-VERSION = "0.5.2"  # also in .claude-plugin/plugin.json and CHANGELOG.md
+VERSION = "0.5.3"  # also in .claude-plugin/plugin.json and CHANGELOG.md
 MAX_FINDINGS = 10
 MARGIN = 2              # lines of context around an edit that still count as touched
 LINT_TIMEOUT = 10       # seconds per linter run
@@ -57,6 +58,49 @@ def config_home():
 def find_binary(name):
     extra = os.pathsep.join(str(Path(p).expanduser()) for p in EXTRA_PATH)
     return shutil.which(name, path=os.environ.get("PATH", "") + os.pathsep + extra)
+
+
+# ---------------------------------------------------------------- install requirements
+# A catalog entry may declare "requires": the named check decides whether setup/sync may
+# install it at all. An unmet gate means SKIP plus a one-time notice, never an install.
+
+def _xcode_select():
+    """`xcode-select -p` output, or None on any failure (no CLT, timeout, missing binary)."""
+    try:
+        proc = subprocess.run(["xcode-select", "-p"], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def xcode_present():
+    """Full Xcode.app present — a Command Line Tools path does NOT count (brew swiftlint
+    requires xcode >= 8.0, the full app). Any failure fails CLOSED (no Xcode)."""
+    try:
+        path = _xcode_select()
+    except Exception:
+        return False
+    return bool(path and ".app/Contents/Developer" in path)
+
+
+REQUIREMENT_CHECKS = {"xcode": xcode_present}
+
+
+def requirement_unmet(linter):
+    """The human reason the linter's `requires` gate is unmet, or None when met/undeclared.
+    The check resolves through the module namespace at call time, so tests can
+    monkeypatch cc.xcode_present."""
+    req = linter.get("requires") or {}
+    name = req.get("check") or ""
+    entry = REQUIREMENT_CHECKS.get(name)
+    if entry is None:
+        return None
+    # resolve via the entry's function name at call time, so monkeypatching
+    # cc.xcode_present is honoured
+    check = globals().get(getattr(entry, "__name__", ""), entry)
+    if check():
+        return None
+    return req.get("reason") or ""
 
 
 def _load_json(path, default):
@@ -146,6 +190,15 @@ def _gcc_parse(stdout):
             out.append((int(m.group(1)), rule.group(1) if rule else "lint",
                         text[:rule.start()].strip() if rule else text))
     return out
+
+
+def _swiftformat_parse(stdout):
+    """swiftformat --lint --reporter json prints a JSON array ON STDOUT (the default
+    reporter writes gcc-style lines to stderr, mixed with progress lines):
+    [{"file", "line", "reason", "rule_id"}]. Lines are already 1-based; rule_id is the code."""
+    return [(int(item.get("line", 0)), str(item.get("rule_id") or "swiftformat"),
+             str(item.get("reason", "")))
+            for item in json.loads(stdout or "[]") if isinstance(item, dict)]
 
 
 _ACTIONLINT_RULE = re.compile(r"\[([\w/.-]+)\]\s*$")
@@ -249,9 +302,26 @@ BUILTIN = [
      "parse": _biome_parse},
     {"id": "swiftlint", "language": "Swift", "binary": "swiftlint", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "swiftlint"]},
+     # brew's swiftlint requires `xcode >= 8.0` — the FULL Xcode.app, not the Command Line
+     # Tools. Without it the install is a multi-GB App Store download check-code must not
+     # trigger, so the gate skips the linter with a one-time notice instead of installing.
+     "requires": {"check": "xcode",
+                  "reason": "swiftlint skipped: it needs the full Xcode app (a multi-GB App "
+                            "Store download), which is not installed. Install Xcode yourself "
+                            "if you want swiftlint; check-code then installs it automatically."},
      "ext": ["swift"], "shebang": None,
      "command": lambda path: ["swiftlint", "lint", "--no-cache", str(path)],
      "parse": _gcc_parse},
+    {"id": "swiftformat", "language": "Swift", "binary": "swiftformat", "tier": "polyglot",
+     # no Xcode needed (brew swiftformat has no requirements), so it joins the default tier
+     # either way. trailingCommas is DISABLED: swiftlint's default trailing_comma rule
+     # FORBIDS trailing commas while swiftformat's default ADDS them — opposite verdicts
+     # on the same line (measured 2026-11-25), so swiftlint's rule wins.
+     "install": {"manager": "brew", "cmd": ["brew", "install", "swiftformat"]},
+     "ext": ["swift"], "shebang": None,
+     "command": lambda path: ["swiftformat", "--lint", "--reporter", "json",
+                              "--disable", "trailingCommas", str(path)],
+     "parse": _swiftformat_parse},
     {"id": "rubocop", "language": "Ruby", "binary": "rubocop", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "rubocop"]},
      "ext": ["rb"], "shebang": None,
@@ -262,10 +332,13 @@ BUILTIN = [
      "tier": "polyglot",
      # brew's typescript-language-server ships only cli.mjs and its sibling typescript
      # package can be a stub, so a bare install can be present but BROKEN (noServer on
-     # every request): the typescript lib installs with it, and the probe below is what
-     # decides "installed" (a functional probe, not a binary on PATH).
+     # every request): the probe below is what decides "installed" (a functional probe,
+     # not a binary on PATH). TypeScript 7 is native and ships NO tsserver.js at all, so
+     # the extra step installs a PRIVATE typescript@6 under $CHECK_CODE_HOME/tsserver,
+     # which tslsp-lint.py looks up first — the user's global typescript is never touched.
      "install": {"manager": "brew",
-                 "cmd": ["brew", "install", "typescript-language-server", "typescript"]},
+                 "cmd": ["brew", "install", "typescript-language-server", "typescript"],
+                 "extra": [["npm", "install", "--prefix", "{home}/tsserver", "typescript@6"]]},
      "ext": ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"], "shebang": None,
      "probe": {"fixture": "scripts/probe/bad.ts", "expect_code": "2322"},
      "command": _tslsp_command, "parse": _tslsp_parse},
@@ -280,14 +353,27 @@ BUILTIN = [
 ]
 
 
+def install_cmds(linter):
+    """Every install command for a linter, in order: [cmd] + extra, each a list[str], with
+    the {home} placeholder expanded to config_home(). Local linters may carry a plain
+    string; a malformed entry degrades to what it holds instead of crashing a display path."""
+    install = linter.get("install") or ""
+    if isinstance(install, str):
+        return [shlex.split(install)] if install else []
+    cmd = install.get("cmd", [])
+    cmds = [shlex.split(cmd)] if isinstance(cmd, str) and cmd else [list(cmd)]
+    home = str(config_home())
+    for extra in install.get("extra") or []:
+        cmds.append([str(part).replace("{home}", home) for part in extra])
+    return cmds
+
+
 def install_hint(linter):
-    """Display form of the install command (local linters carry a plain string; a malformed
-    entry degrades to what it holds instead of crashing a display path)."""
+    """Display form of ALL the install commands, joined with ' && '."""
     install = linter.get("install") or ""
     if isinstance(install, str):
         return install
-    cmd = install.get("cmd", [])
-    return cmd if isinstance(cmd, str) else " ".join(str(part) for part in cmd)
+    return " && ".join(" ".join(str(part) for part in cmd) for cmd in install_cmds(linter))
 
 
 # ------------------------------------------- help/menu text, generated FROM the catalog
@@ -325,6 +411,8 @@ def _linter_help_line(lin):
         match.append("or a matching shebang")
     if lin.get("path_regex"):
         match.append("matched by path " + lin["path_regex"])
+    if lin.get("requires"):
+        match.append("requires " + str(lin["requires"].get("check", "")))
     detail = "   (%s)" % ", ".join(match) if match else ""
     return "  %-9s %-15s install: %-40s%s" % (lin["language"].lower(), lin["id"],
                                               install_hint(lin), detail)
@@ -478,7 +566,11 @@ def _default_probe(linter):
     expect = str(probe.get("expect_code") or "")
     if expect and expect in codes:
         return True, "probe ok (%s reported)" % expect
-    return False, "probe did not report %s (got: %s)" % (expect, ", ".join(codes) or "nothing")
+    detail = "probe did not report %s (got: %s)" % (expect, ", ".join(codes) or "nothing")
+    err_lines = [line.strip() for line in (proc.stderr or "").splitlines() if line.strip()]
+    if err_lines:
+        detail += "; last stderr: %s" % err_lines[-1]   # the driver's own last word (e.g. the TS7 hint)
+    return False, detail
 
 
 def linter_ready(linter, probe_runner=None):
@@ -940,11 +1032,16 @@ def _build_setup_epilog():
     basic = _wrap("  basic     %s (%s) -- opt in if you know you will not touch the polyglot "
                   "languages"
                   % (_tier_summary("basic"), ", ".join(_tier_languages("basic"))))
+    gated = [lin for lin in BUILTIN if lin.get("requires")]
+    gate = ("\n".join(_wrap("  %-11s requires %s -- installed only when the requirement is "
+                            "met; otherwise skipped with a one-time notice (never retried "
+                            "daily)" % (lin["id"], lin["requires"].get("check", "")))
+                      for lin in gated) + "\n") if gated else ""
     return """\
 tiers:
 %s
 %s
-  none      no external linters: built-in checks still run and coverage notices stay silent
+%s  none      no external linters: built-in checks still run and coverage notices stay silent
 interactive (stdin is a TTY): choose a tier (Enter = polyglot, the shown default), see the
 plan, confirm. Installs use the package manager the catalog names (brew, pipx) and never sudo;
 a missing package manager prints the command to run yourself instead of failing. After each
@@ -953,7 +1050,7 @@ the installer's exit code.
 environment:
   CHECK_CODE_HOME   config dir holding config.json (the recorded tier) and linters.local.json
                     (default ~/.claude/check-code)
-""" % (poly, basic)
+""" % (poly, basic, gate)
 
 
 SETUP_EPILOG = _build_setup_epilog()
@@ -978,6 +1075,16 @@ def _run_install(cmd):
     return proc.returncode == 0, reason
 
 
+def _run_installs(cmds, run_install):
+    """Run install commands in order, stopping at the first failure: (ok, reason).
+    run_install is THE injectable single-command runner (tests replace it)."""
+    for cmd in cmds:
+        ok, reason = run_install(cmd)
+        if not ok:
+            return False, reason
+    return True, "ok"
+
+
 def setup_plan(tier, probe_runner=None):
     """[(linter, status, detail)] for the tier: installed / install / cannot.
     "installed" means READY (binary resolves AND the catalog's probe passes), not merely
@@ -987,6 +1094,10 @@ def setup_plan(tier, probe_runner=None):
     plan = []
     for linter in [dict(item) for item in BUILTIN]:
         if not tier_covers(tier, linter["tier"]):
+            continue
+        reason = requirement_unmet(linter)
+        if reason:
+            plan.append((linter, "skipped", reason))
             continue
         if linter_ready(linter, probe_runner):
             plan.append((linter, "installed", find_binary(linter["binary"])))
@@ -1008,7 +1119,8 @@ def _print_plan(tier, plan):
         print("  %-11s %s: %s" % (linter["id"],
                                   {"installed": "already installed",
                                    "install": "will install",
-                                   "cannot": "cannot install here"}[status], detail))
+                                   "cannot": "cannot install here",
+                                   "skipped": "skipped (needs Xcode)"}[status], detail))
 
 
 def record_tier(tier):
@@ -1082,7 +1194,7 @@ def cmd_setup(args):
     for linter, status, reason in plan:
         if status != "install":
             continue
-        _run_install(linter["install"]["cmd"])
+        _run_installs(install_cmds(linter), _run_install)
         # verify by outcome, not by exit code: ready = binary AND probe, not just on PATH
         if linter_ready(linter):
             print("  %-11s installed: %s" % (linter["id"], find_binary(linter["binary"])))
@@ -1168,6 +1280,22 @@ def _sync_main_run(home, tier, clock, spawn, find_bin, say):
     if tier == "none":
         return 0
     state = _load_sync_state(home)
+    # gated linters (e.g. swiftlint without full Xcode): say the reason once per linter,
+    # clear the flag when the requirement becomes met, and never spawn work for them
+    notices = state.setdefault("requires_notice", {})
+    for lin in BUILTIN:
+        if not tier_covers(tier, lin["tier"]):
+            continue
+        reason = requirement_unmet(lin)
+        if reason:
+            if not notices.get(lin["id"]):
+                say(reason)
+                notices[lin["id"]] = True
+                _save_sync_state(home, state)
+        elif notices.pop(lin["id"], None) is not None:
+            _save_sync_state(home, state)
+    unmet = {lin["id"] for lin in BUILTIN
+             if tier_covers(tier, lin["tier"]) and requirement_unmet(lin)}
     pending = [(lid, res) for lid, res in sorted(state.get("results", {}).items())
                if not res.get("reported")]
     if pending:
@@ -1181,14 +1309,16 @@ def _sync_main_run(home, tier, clock, spawn, find_bin, say):
             res["reported"] = True
         _save_sync_state(home, state)
     missing = [lin for lin in BUILTIN
-               if tier_covers(tier, lin["tier"]) and not find_bin(lin["binary"])]
+               if tier_covers(tier, lin["tier"]) and lin["id"] not in unmet
+               and not find_bin(lin["binary"])]
     # A PRESENT binary is only trusted when the worker's cached probe verdict is fresh:
     # present-but-broken (stub typescript lib -> noServer) is the exact silent failure
     # this release exists to kill. Probing here would be too slow, so the worker probes
     # and caches the verdict, and sync re-spawns at most once per PROBE_INTERVAL.
     probes = state.get("probes") or {}
     due = [lin for lin in BUILTIN
-           if tier_covers(tier, lin["tier"]) and "probe" in lin and find_bin(lin["binary"])
+           if tier_covers(tier, lin["tier"]) and lin["id"] not in unmet and "probe" in lin
+           and find_bin(lin["binary"])
            and not (isinstance(probes.get(lin["id"]), dict)
                     and clock() - probes[lin["id"]].get("at", 0) < PROBE_INTERVAL)]
     due = [lin for lin in due if lin["id"] not in {m["id"] for m in missing}]
@@ -1251,6 +1381,8 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
     for lin in [dict(item) for item in BUILTIN]:
         if not tier_covers(tier, lin["tier"]):
             continue
+        if requirement_unmet(lin):
+            continue                   # gated: never installed, probed or retried
         lid = lin["id"]
         ok_ready = ready(lin)
         # every verdict is cached, so the fast main sync can trust "present" without probing
@@ -1261,7 +1393,7 @@ def _sync_worker_run(home, tier, clock, run_install, ready):
         prev = (state.get("results") or {}).get(lid) or {}
         if prev.get("status") == "failed" and now - prev.get("at", 0) < SYNC_RETRY_AFTER:
             continue                     # a broken installer must not loop every session
-        ok, reason = run_install(lin["install"]["cmd"])
+        ok, reason = _run_installs(install_cmds(lin), run_install)
         ok_ready = ready(lin)            # verify by outcome: probe decides, not the exit code
         state["probes"][lid] = {"ok": ok_ready, "at": now}
         state.setdefault("results", {})[lid] = {

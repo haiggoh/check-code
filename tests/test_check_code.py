@@ -1579,6 +1579,21 @@ def test_swiftformat_output_introduces_no_swiftlint_violations(tmp_path):
     assert "trailing_comma" not in codes
 
 
+@pytest.mark.skipif(shutil.which("swiftformat") is None, reason="swiftformat not installed")
+def test_swiftformat_fixture_is_reproducible_by_the_declared_command(tmp_path):
+    """M3 QC: the captured fixture must be reproducible by running the catalog's OWN command
+    on the same bad file and parsing its stdout — pins that the command (JSON on stdout)
+    was measured, not guessed. Dropping --reporter json moves findings to stderr and this
+    goes RED."""
+    src = tmp_path / "bad.swift"
+    src.write_text(BAD_SWIFT)
+    entry = next(e for e in cc.BUILTIN if e["id"] == "swiftformat")
+    proc = subprocess.run(entry["command"](src), capture_output=True, text=True, timeout=60)
+    live = entry["parse"](proc.stdout)
+    fixture = cc._swiftformat_parse((FIXTURES / "swiftformat-lint.txt").read_text(encoding="utf-8"))
+    assert live == fixture
+
+
 def test_linter_ready_needs_the_binary(monkeypatch):
     monkeypatch.setattr(cc, "find_binary", lambda name: None)
     assert cc.linter_ready(_fake_linter()) is False
