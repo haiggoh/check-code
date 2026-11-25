@@ -1144,6 +1144,7 @@ def test_setup_requires_yes_when_not_a_tty(monkeypatch, capsys):
 def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, capsys):
     # the owner's default is opt-out: `setup --yes` with no --tier = confirmed polyglot
     monkeypatch.setattr(cc, "_isatty", lambda: False)
+    monkeypatch.setattr(cc, "xcode_present", lambda: True)   # host-independent: gate met
     installed = set()
     monkeypatch.setattr(cc, "find_binary",
                         lambda n: "/bin/" + n
@@ -1404,21 +1405,29 @@ def test_print_plan_labels_skipped_and_setup_never_installs_it(monkeypatch, caps
 
 
 def test_sync_says_gate_reason_once_and_spawns_nothing_for_it(tmp_path, monkeypatch):
+    # M2 QC: one notice PER LINTER (two gated linters here), none for a gated linter that
+    # has a probe and its binary present (it must not land in `due` either), no spawn,
+    # and no re-say even after 24 h — the notice has no TTL.
     home = tmp_path / "sync-home"
     home.mkdir()
     lin = _fake_linter(id="swiftlint", binary="swiftlint",
                        requires={"check": "xcode", "reason": XCODE_NOTICE})
-    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    lin2 = _fake_linter(id="gated2", binary="gated2-bin",
+                        requires={"check": "xcode", "reason": "gated2 skipped: reason"})
+    probed = _fake_linter(id="gated3", binary="gated3-bin",
+                          probe={"fixture": "scripts/probe/bad.ts", "expect_code": "2322"},
+                          requires={"check": "xcode", "reason": "gated3 skipped: reason"})
+    monkeypatch.setattr(cc, "BUILTIN", [lin, lin2, probed])
     monkeypatch.setattr(cc, "xcode_present", lambda: False)
     said, spawned = [], []
 
     def find_bin(n):
-        return "/fake/brew" if n == "brew" else None
+        return "/fake/brew" if n == "brew" else "/fake/" + n if n == "gated3-bin" else None
 
-    cc._sync_main_run(home, "polyglot", _sync_clock(1000.0), spawned.append, find_bin, said.append)
-    assert said == [XCODE_NOTICE] and spawned == []
-    cc._sync_main_run(home, "polyglot", _sync_clock(2000.0), spawned.append, find_bin, said.append)
-    assert said == [XCODE_NOTICE]                # once per linter, never retried daily
+    for t in (1000.0, 2000.0, 1000.0 + 86401):    # the last run is > 24 h later
+        cc._sync_main_run(home, "polyglot", _sync_clock(t), spawned.append, find_bin, said.append)
+    assert said == [XCODE_NOTICE, "gated2 skipped: reason", "gated3 skipped: reason"]
+    assert spawned == []                          # unmet gate: never spawns, never in due
 
 
 def test_gate_lifts_when_xcode_appears(tmp_path, monkeypatch):
@@ -1466,6 +1475,45 @@ def test_setup_help_names_the_xcode_gate():
     line = next(ln for ln in cc.HELP_EPILOG.splitlines() if "swiftlint" in ln)
     assert "requires xcode" in line
     assert "xcode" in cc.SETUP_EPILOG
+    for argv in (("--help",), ("setup", "--help")):   # the shipped CLI text, not just constants
+        r = cli(*argv)
+        assert r.returncode == 0 and "xcode" in (r.stdout + r.stderr), argv
+
+
+def test_xcode_select_nonzero_or_timeout_means_no_xcode(monkeypatch):
+    """M2 QC: the production failure modes of xcode-select (nonzero exit, timeout) go
+    through _xcode_select's None path — fail closed."""
+    class FakeProc:
+        returncode = 1
+        stdout = ""
+
+    monkeypatch.setattr(cc.subprocess, "run", lambda *a, **k: FakeProc())
+    assert cc._xcode_select() is None and cc.xcode_present() is False
+
+    def timeout(*a, **k):
+        raise subprocess.TimeoutExpired(cmd="xcode-select", timeout=5)
+    monkeypatch.setattr(cc.subprocess, "run", timeout)
+    assert cc._xcode_select() is None and cc.xcode_present() is False
+
+
+def test_sync_main_merged_message_carries_the_gate_reason(tmp_path, monkeypatch, capsys):
+    """M2 QC: through the shipped entry point (_sync_main), the 0.5.2 single-JSON
+    systemMessage carries the gate reason verbatim."""
+    home = tmp_path / "sync-home"
+    home.mkdir()
+    lin = _fake_linter(id="swiftlint", binary="swiftlint",
+                       requires={"check": "xcode", "reason": XCODE_NOTICE})
+    monkeypatch.setattr(cc, "BUILTIN", [lin])
+    monkeypatch.setattr(cc, "xcode_present", lambda: False)
+
+    def find_bin(n):
+        return "/fake/brew" if n == "brew" else None
+
+    rc = cc._sync_main(home, "polyglot", _sync_clock(1000.0), spawn=lambda argv: None,
+                       find_bin=find_bin)
+    out = capsys.readouterr().out.strip()
+    assert rc == 0
+    assert json.loads(out)["systemMessage"] == "🩻 check-code: " + XCODE_NOTICE
 
 
 def test_linter_ready_needs_the_binary(monkeypatch):
