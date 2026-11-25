@@ -812,7 +812,7 @@ def test_catalog_dispatch_new_languages(tmp_path):
     assert ids(tmp_path / "a.tsx") == ["biome", "typescript-lsp"]
     assert ids(tmp_path / "a.js") == ["biome", "typescript-lsp"]
     assert ids(tmp_path / "a.jsx") == ["biome", "typescript-lsp"]
-    assert ids(tmp_path / "a.swift") == ["swiftlint"]
+    assert ids(tmp_path / "a.swift") == ["swiftlint", "swiftformat"]   # 0.5.3: both run on .swift
     assert ids(tmp_path / "a.rb") == ["rubocop"]
     assert ids(tmp_path / "a.json") == []       # no catalog entry claims json (notice rule C1)
     assert ids(tmp_path / "compose.yml") == []  # non-workflow yaml never reaches actionlint
@@ -1161,6 +1161,7 @@ def test_setup_yes_without_a_tier_installs_the_polyglot_default(monkeypatch, cap
     assert rc == 0
     assert calls == [["pipx", "install", "ruff"], ["brew", "install", "shellcheck"],
                      ["brew", "install", "biome"], ["brew", "install", "swiftlint"],
+                     ["brew", "install", "swiftformat"],
                      ["brew", "install", "rubocop"],
                      ["brew", "install", "typescript-language-server", "typescript"],
                      ["npm", "install", "--prefix", str(cc.config_home() / "tsserver"),
@@ -1514,6 +1515,68 @@ def test_sync_main_merged_message_carries_the_gate_reason(tmp_path, monkeypatch,
     out = capsys.readouterr().out.strip()
     assert rc == 0
     assert json.loads(out)["systemMessage"] == "🩻 check-code: " + XCODE_NOTICE
+
+
+# ---- 0.5.3: swiftformat (no Xcode needed) joins the polyglot tier --------------------
+
+def test_swiftformat_in_catalog_polyglot_swift_ext():
+    entry = next(e for e in cc.BUILTIN if e["id"] == "swiftformat")
+    assert entry["tier"] == "polyglot" and entry["ext"] == ["swift"] and entry["shebang"] is None
+    assert entry["binary"] == "swiftformat"
+    assert entry["install"] == {"manager": "brew", "cmd": ["brew", "install", "swiftformat"]}
+    # trailingCommas is disabled: swiftlint's default trailing_comma rule FORBIDS trailing
+    # commas while swiftformat's default ADDS them — opposite verdicts, so swiftlint wins
+    assert entry["command"](Path("/x/y.swift")) == \
+        ["swiftformat", "--lint", "--reporter", "json", "--disable", "trailingCommas",
+         "/x/y.swift"]
+
+
+def test_swiftformat_parser_reads_real_fixture():
+    out = cc._swiftformat_parse((FIXTURES / "swiftformat-lint.txt").read_text(encoding="utf-8"))
+    assert (3, "redundantVoidReturnType", "Remove explicit Void return type.") in out
+    assert (8, "redundantParens", "Remove redundant parentheses.") in out
+    assert all(rule != "trailingCommas" for _, rule, _ in out)   # disabled rule never reported
+    assert all(line >= 1 for line, _, _ in out)      # 1-based lines, rule id as the code
+
+
+def test_swiftformat_parser_empty_is_no_findings():
+    assert cc._swiftformat_parse("") == []
+    assert cc._swiftformat_parse("[\n\n]") == []       # clean file: empty JSON array on stdout
+
+
+BAD_SWIFT = """class Fetchdata {
+    var x = 1
+    func load() -> Void {
+        let arr = [
+            1,
+            2
+        ]
+        if (arr.count > 0) {
+            print(arr)
+        }
+    }
+}
+"""
+
+
+@pytest.mark.skipif(shutil.which("swiftformat") is None or shutil.which("swiftlint") is None,
+                    reason="swift linters not installed")
+def test_swiftformat_output_introduces_no_swiftlint_violations(tmp_path):
+    """Review Focus 5, measured 2026-11-25: after swiftformat rewrites the file, swiftlint
+    must NOT report the rules swiftformat already fixed (redundant_void_return,
+    control_statement) nor complain (trailing_comma) about the comma swiftformat added —
+    the two linters do not contradict on default rules."""
+    src = tmp_path / "bad.swift"
+    src.write_text(BAD_SWIFT)
+    entry = next(e for e in cc.BUILTIN if e["id"] == "swiftformat")
+    apply_cmd = [c for c in entry["command"](src) if c != "--lint"]   # same rules, mutating
+    subprocess.run(apply_cmd, capture_output=True, text=True, timeout=60)
+    r = subprocess.run(["swiftlint", "lint", "--no-cache", str(src)],
+                       capture_output=True, text=True, timeout=60)
+    codes = [ln.split("(")[-1].rstrip(")").rstrip() for ln in r.stdout.splitlines() if "(" in ln]
+    assert "redundant_void_return" not in codes
+    assert "control_statement" not in codes
+    assert "trailing_comma" not in codes
 
 
 def test_linter_ready_needs_the_binary(monkeypatch):

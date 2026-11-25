@@ -1,0 +1,14 @@
+[
+  {
+    "file" : "/tmp/cc-swiftfmt/bad.swift",
+    "line" : 3,
+    "reason" : "Remove explicit Void return type.",
+    "rule_id" : "redundantVoidReturnType"
+  },
+  {
+    "file" : "/tmp/cc-swiftfmt/bad.swift",
+    "line" : 8,
+    "reason" : "Remove redundant parentheses.",
+    "rule_id" : "redundantParens"
+  }
+]

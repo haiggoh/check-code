@@ -192,6 +192,15 @@ def _gcc_parse(stdout):
     return out
 
 
+def _swiftformat_parse(stdout):
+    """swiftformat --lint --reporter json prints a JSON array ON STDOUT (the default
+    reporter writes gcc-style lines to stderr, mixed with progress lines):
+    [{"file", "line", "reason", "rule_id"}]. Lines are already 1-based; rule_id is the code."""
+    return [(int(item.get("line", 0)), str(item.get("rule_id") or "swiftformat"),
+             str(item.get("reason", "")))
+            for item in json.loads(stdout or "[]") if isinstance(item, dict)]
+
+
 _ACTIONLINT_RULE = re.compile(r"\[([\w/.-]+)\]\s*$")
 
 # actionlint's default output interleaves code-snippet blocks on stdout, and a snippet source
@@ -303,6 +312,16 @@ BUILTIN = [
      "ext": ["swift"], "shebang": None,
      "command": lambda path: ["swiftlint", "lint", "--no-cache", str(path)],
      "parse": _gcc_parse},
+    {"id": "swiftformat", "language": "Swift", "binary": "swiftformat", "tier": "polyglot",
+     # no Xcode needed (brew swiftformat has no requirements), so it joins the default tier
+     # either way. trailingCommas is DISABLED: swiftlint's default trailing_comma rule
+     # FORBIDS trailing commas while swiftformat's default ADDS them — opposite verdicts
+     # on the same line (measured 2026-11-25), so swiftlint's rule wins.
+     "install": {"manager": "brew", "cmd": ["brew", "install", "swiftformat"]},
+     "ext": ["swift"], "shebang": None,
+     "command": lambda path: ["swiftformat", "--lint", "--reporter", "json",
+                              "--disable", "trailingCommas", str(path)],
+     "parse": _swiftformat_parse},
     {"id": "rubocop", "language": "Ruby", "binary": "rubocop", "tier": "polyglot",
      "install": {"manager": "brew", "cmd": ["brew", "install", "rubocop"]},
      "ext": ["rb"], "shebang": None,
