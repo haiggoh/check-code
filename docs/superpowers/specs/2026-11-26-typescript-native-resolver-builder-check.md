@@ -1,7 +1,11 @@
-# Builder check — TS 7-native resolver design (UNSORTED)
+# Builder check — TS 7-native resolver design (SORTED 2026-11-27)
 
 Dispatched 2026-11-26 to Mistral Large 4 (Le Chonk, NVIDIA), remote stateless dispatch, role reasoner.
-NEXT: sort into answered / minor (builder call) / user-decision; update the design; get user approval; then superpowers:writing-plans.
+Sorted 2026-11-27 — none needed the user:
+- Q1 ANSWERED by probe (first pull reply waits for project load; excluded/no-tsconfig files are checked) → design Facts.
+- Q2 ANSWERED by probe + builder call (keep severity 1/2 incl. syntax; drop 3/4; tls adds syntacticDiagnosticsSync) → design Builder's calls.
+- Q3 ANSWERED by existing code (probe in setup/sync, cached; lint path never probes) → Facts + Builder's calls.
+- Q4, Q5, Q6 BUILDER CALLS → design Builder's calls.
 
 Ranked questions I'd need answered before planning this well:
 

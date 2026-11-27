@@ -33,6 +33,22 @@ uses, and check-code must never force a TypeScript upgrade the user did not choo
   biome, rubocop, swiftformat, actionlint via brew), never the language runtime; each catalog
   entry names exactly ONE manager, and a missing manager means a "run it yourself" notice. No
   install ever uses sudo.
+- TS 7 pull diagnostics are trustworthy on the FIRST answer (probed 2026-11-27, scratch probe,
+  error planted in memory via `didOpen` text, disk untouched):
+  - Cold start on a 1,018-file repo (TypeGPU): the `textDocument/diagnostic` reply WAITED for the
+    project to load (10.8 s) and contained the planted `2322`. No empty-while-loading reply
+    (one sample).
+  - A file with no tsconfig anywhere, and a file EXCLUDED by its tsconfig's `include`, are both
+    checked (inferred project with default options), never silently skipped.
+  - The reply holds syntactic (`1109`) AND semantic errors, plus suggestions: "unused" (`6133`)
+    is severity 4 by default and severity 2 when the project sets `noUnusedLocals`. So severity
+    follows the project's own config.
+- Today's tls path asks only `semanticDiagnosticsSync`, so it NEVER reports syntax errors.
+- Readiness is already separate from linting: the functional probe runs in `setup` / `sync`
+  and is cached per `PROBE_INTERVAL`; the per-edit lint path never probes, and a run that fails
+  exits 2 with the driver's last stderr line in the detail (`bin/check-code.py` ~L560-600, ~L1335).
+- Per-edit cost: a fresh server per lint means a cold project load per edit (~11 s on a
+  1,018-file repo), on BOTH drivers. Pre-existing, unchanged by this design.
 - Latent bug found while probing: `tslsp-lint.py` waits with `selectors` on a BUFFERED
   `Popen` stdout and reads with `readline()`. Data already pulled into Python's buffer is
   invisible to `select()`, so a second message that arrived in the same chunk can stall the
@@ -124,8 +140,29 @@ uses, and check-code must never force a TypeScript upgrade the user did not choo
 - **Catalog id:** keep `typescript-lsp` as the id (users' config/state reference it); its
   `binary` check becomes "the resolver finds a usable TypeScript", since there is no longer a
   single binary.
-- **LSP timeout:** keep `LSP_TIMEOUT = 60` for the tls path; the native path measured 0.5 s
-  and needs no change.
+- **LSP timeout:** keep `LSP_TIMEOUT = 60` for both drivers: the native path is 0.5 s warm
+  but measured 10.8 s cold on a large repo, still well inside 60 s.
+- **Which diagnostics are reported (both drivers alike):** severities 1 (error) and 2 (warning)
+  only; 3/4 (information/hint) are dropped, so "unused" shows only where the project itself
+  enables `noUnusedLocals`. Syntax errors are kept. The tls driver additionally requests
+  `syntacticDiagnosticsSync` so it stops missing syntax errors. (Changes `_tslsp_parse`'s
+  current "3/4 pass through"; any new built-in filtering lives in ONE place.)
+- **Readiness vs. linting:** unchanged split. The resolver is a pure per-file function on the
+  lint path (no probe). The functional probe runs in `setup`/`sync` through the SAME resolver,
+  cached per `PROBE_INTERVAL` as today. A mid-run failure keeps today's exit-2-with-stderr.
+- **Project TS ≤ 6 whose lib is incomplete** (no `tsserver.js`/`typescript.js`): treated
+  exactly like "tls not installed" — lint with a TS 7 if one resolves, with the note; without
+  any TS 7, exit 2 naming the project path and the problem. The resolver never skips down to
+  a global TS ≤ 6 for a project that pins its own version.
+- **`CHECK_CODE_TSSERVER_LIB`:** keeps TOP precedence and forces the tls driver with that lib,
+  as today, for users who set it. Set but invalid (missing dir, or no `tsserver.js`) → exit 2
+  naming the variable; never a silent fall-through to the resolver.
+- **The TS 7 fallback note + queued tls install:** the runner records "tls needed" (project
+  path, pinned version) in check-code's state under `$CHECK_CODE_HOME`. The existing
+  background `sync --worker` treats that as a missing linter and installs tls privately. The
+  note appears once per project and stays until the install lands (persisted, not per edit).
+  It travels as a non-diagnostic line the parser ignores and the hook shows as a notice. The
+  exact line shape is left to the plan.
 
 ## Left to the builder (the plan)
 
