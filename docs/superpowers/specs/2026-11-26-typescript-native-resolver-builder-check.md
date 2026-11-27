@@ -1,0 +1,19 @@
+# Builder check — TS 7-native resolver design (UNSORTED)
+
+Dispatched 2026-11-26 to Mistral Large 4 (Le Chonk, NVIDIA), remote stateless dispatch, role reasoner.
+NEXT: sort into answered / minor (builder call) / user-decision; update the design; get user approval; then superpowers:writing-plans.
+
+Ranked questions I'd need answered before planning this well:
+
+1. **Can the first native pull-diagnostics response be trusted?** Does `tsc --lsp --stdio` block the `textDocument/diagnostic` response until the project has finished loading (or emit a load-finished notification we can wait on), and does it apply the file's nearest tsconfig automatically (from the `didOpen` path / rootUri), or lint with defaults? What happens for a file not covered by any tsconfig `include` (inferred project vs. empty diagnostics)? — If the first response can be empty-while-loading or silently skip files outside the project, the driver can print a false "clean", which is exactly the silent-failure anti-goal. The answer decides whether the native driver needs a load-wait/re-poll loop or can trust the first response, and whether `_project_root` must be passed at `initialize`.
+
+2. **Diagnostic content parity between the two drivers.** The tls path effectively reports semantic diagnostics (`semanticDiagnosticsSync`, plus push when it works); the native pull returns full LSP diagnostics — syntactic, semantic, and possibly hint/suggestion severities. Should the native driver pass everything through, or filter (e.g. drop Hint/Information)? Must parse errors be included even though the tls sync path never requested them? — This decides the response-mapping code in the native driver and possibly severity handling in `_tslsp_parse`/display. A wrong guess either floods every TS user with hint-level noise or silently drops real syntax errors.
+
+3. **When does the 2322 functional probe run, i.e. what does "usable" mean per lint run?** Is the probe on `scripts/probe/bad.ts` executed only in the readiness/setup check (cached where, invalidated when), or on every lint invocation through whatever the resolver picks? — This decides whether the resolver is a pure per-file function (fast, but present-but-broken only surfaces at readiness) or probes per run (~0.5 s+ added per file per edit, but self-healing), and what the exit-2 hint should say when a candidate that passed readiness fails mid-run.
+
+4. **Project TS ≤ 6 with an incomplete lib.** If the nearest `node_modules/typescript` is ≤ 6 but missing `tsserver.js`/`typescript.js`, does resolution stop at goal 1.1 (project TS "found" but undrivable → exit 2? TS 7 with note?) or continue down to 1.2/1.3 (any TS 7, global TS ≤ 6)? — The builder's call covers "tls not yet installed" but not "lib unusable". The answer changes resolver control flow and whether such a project ever gets linted by TS 7.
+
+5. **Precedence of `CHECK_CODE_TSSERVER_LIB` in the new resolver order.** Today the env override forces tls + that lib above everything. In the new order, does it (a) keep top precedence and force the tls driver with that lib regardless of what the project pins, or (b) merely act as one more candidate lib dir for a ≤ 6 tls run? — Users who set it to the old private `typescript@6` expect today's behavior; the wrong choice either ignores their override or drives a TS 7 project through a TS 6 lib.
+
+6. **Mechanics of the TS 7-fallback note and the queued tls install.** For a TS ≤ 6 project with no tls yet: (a) what does "one-time" mean — per lint run, per session, or persisted until the install lands; (b) which channel carries the note (stderr vs. a marker in the JSON stream) so `_tslsp_parse` stays intact; (c) who enqueues the private tls install in the background `sync --worker` — the short-lived runner subprocess writing state, or `check-code.py` reacting to the runner's output/exit? — These decide whether the note appears once or on every edit, and whether the install actually gets queued at all.
+
